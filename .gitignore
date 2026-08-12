@@ -1,0 +1,44 @@
+# --- Secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Local dev data stores (project-local Postgres/Redis clusters) ----------
+.devdata/
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Node / frontend -------------------------------------------------------
+node_modules/
+frontend/dist/
+*.local
+
+# --- AI model artefacts (never commit weights) -----------------------------
+models/
+*.gguf
+*.onnx
+*.bin
+
+# --- Audio (privacy: raw call audio must not land in git) ------------------
+*.wav
+*.raw
+*.opus
+recordings/
+
+# --- Editors / OS ----------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

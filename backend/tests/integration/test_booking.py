@@ -1,0 +1,389 @@
+"""Transactional booking, cancellation and rescheduling."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import timedelta
+
+import pytest
+from sqlalchemy import func, select
+
+from app.appointments.availability import AvailabilityQuery, AvailabilityService
+from app.appointments.errors import AppointmentNotFoundError, SlotNotFoundError
+from app.appointments.service import AppointmentService, BookingRequest
+from app.core.errors import AppointmentStateError, BookingRuleError, SlotUnavailableError
+from app.core.timeutils import DayPeriod, utc_now
+from app.database.models.appointment import Appointment
+from app.database.models.audit import AuditEvent
+from app.database.models.availability import AvailabilitySlot
+from app.database.models.enums import AppointmentStatus, AuditAction, BookingSource, SlotStatus
+
+pytestmark = pytest.mark.integration
+
+
+async def _first_available(db, clinic_data, settings, **kwargs) -> AvailabilitySlot:
+    service = AvailabilityService(db, settings)
+    slots = await service.search(
+        AvailabilityQuery(clinic_id=clinic_data.clinic.id, limit=50, **kwargs), clinic_data.tz
+    )
+    assert slots, "fixture should provide availability"
+    return slots[0]
+
+
+async def test_booking_commits_and_consumes_the_slot(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+
+    result = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+
+    assert result.replayed is False
+    appointment = result.appointment
+    assert appointment.status is AppointmentStatus.CONFIRMED
+    assert appointment.start_time == slot.start_time
+
+    # Relationships are loaded, so the caller can speak the result without
+    # triggering a lazy load after commit.
+    assert appointment.practitioner.display_name
+
+    refreshed = await db.get(AvailabilitySlot, slot.id)
+    await db.refresh(refreshed)
+    assert refreshed.status is SlotStatus.BOOKED
+
+
+async def test_booking_is_visible_in_a_separate_session(
+    db, sessionmaker_fixture, clinic_data, settings
+) -> None:
+    """Proves the row was really committed, not just held in the session."""
+    slot = await _first_available(db, clinic_data, settings)
+    result = await AppointmentService(db, settings).book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+
+    async with sessionmaker_fixture() as other:
+        found = await other.get(Appointment, result.appointment.id)
+        assert found is not None
+        assert found.status is AppointmentStatus.CONFIRMED
+
+
+async def test_booking_writes_an_audit_event(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    result = await AppointmentService(db, settings).book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+
+    events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.action == AuditAction.APPOINTMENT_CREATED)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(events) == 1
+    assert events[0].subject_id == result.appointment.id
+    # Audit metadata must never carry patient identifiers.
+    assert "first_name" not in events[0].metadata_json
+    assert "date_of_birth" not in events[0].metadata_json
+
+
+async def test_double_booking_the_same_slot_is_refused(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+
+    with pytest.raises(SlotUnavailableError):
+        await service.book(
+            BookingRequest(
+                clinic_id=clinic_data.clinic.id,
+                patient_id=clinic_data.patients["nguyen"].id,
+                slot_id=slot.id,
+            )
+        )
+
+    count = await db.scalar(select(func.count()).select_from(Appointment))
+    assert count == 1
+
+
+async def test_idempotency_key_replays_instead_of_duplicating(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    request = BookingRequest(
+        clinic_id=clinic_data.clinic.id,
+        patient_id=clinic_data.patients["hughes"].id,
+        slot_id=slot.id,
+        idempotency_key="retry-key-0001",
+    )
+
+    first = await service.book(request)
+    second = await service.book(request)
+
+    assert second.replayed is True
+    assert second.appointment.id == first.appointment.id
+    assert await db.scalar(select(func.count()).select_from(Appointment)) == 1
+
+
+async def test_booking_inside_the_lead_time_is_rejected(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    # Move the slot to 10 minutes from now, inside the 60-minute lead time.
+    slot.start_time = utc_now() + timedelta(minutes=10)
+    slot.end_time = slot.start_time + timedelta(minutes=15)
+    await db.commit()
+
+    with pytest.raises(BookingRuleError):
+        await AppointmentService(db, settings).book(
+            BookingRequest(
+                clinic_id=clinic_data.clinic.id,
+                patient_id=clinic_data.patients["hughes"].id,
+                slot_id=slot.id,
+            )
+        )
+    assert await db.scalar(select(func.count()).select_from(Appointment)) == 0
+
+
+async def test_new_patient_cannot_book_a_type_that_excludes_them(db, clinic_data, settings) -> None:
+    slot = await _first_available(
+        db, clinic_data, settings, appointment_type_id=clinic_data.types["telehealth"].id
+    )
+    with pytest.raises(BookingRuleError):
+        await AppointmentService(db, settings).book(
+            BookingRequest(
+                clinic_id=clinic_data.clinic.id,
+                patient_id=clinic_data.patients["hughes"].id,
+                slot_id=slot.id,
+                is_new_patient=True,
+            )
+        )
+
+
+async def test_unknown_slot_is_rejected(db, clinic_data, settings) -> None:
+    with pytest.raises(SlotNotFoundError):
+        await AppointmentService(db, settings).book(
+            BookingRequest(
+                clinic_id=clinic_data.clinic.id,
+                patient_id=clinic_data.patients["hughes"].id,
+                slot_id=uuid.uuid4(),
+            )
+        )
+
+
+# --- Cancellation -----------------------------------------------------------
+async def test_cancellation_frees_a_future_slot(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+
+    cancelled = await service.cancel(booked.appointment.id, reason="caller request")
+    assert cancelled.status is AppointmentStatus.CANCELLED
+    assert cancelled.cancelled_at is not None
+
+    freed = await db.get(AvailabilitySlot, slot.id)
+    await db.refresh(freed)
+    assert freed.status is SlotStatus.AVAILABLE
+
+
+async def test_a_freed_slot_can_be_rebooked(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    first = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+    await service.cancel(first.appointment.id)
+
+    second = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["nguyen"].id,
+            slot_id=slot.id,
+        )
+    )
+    assert second.appointment.id != first.appointment.id
+    assert second.appointment.status is AppointmentStatus.CONFIRMED
+
+
+async def test_cancelling_twice_is_refused(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+    await service.cancel(booked.appointment.id)
+    with pytest.raises(AppointmentStateError):
+        await service.cancel(booked.appointment.id)
+
+
+async def test_cannot_cancel_another_patients_appointment(db, clinic_data, settings) -> None:
+    """Authorisation, not filtering: a known id is still refused."""
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+        )
+    )
+
+    # Capture the id first: a failed operation rolls back, which expires every
+    # ORM object in the session.
+    appointment_id = booked.appointment.id
+
+    with pytest.raises(AppointmentNotFoundError):
+        await service.cancel(appointment_id, expected_patient_id=clinic_data.patients["nguyen"].id)
+
+    still_confirmed = await db.get(Appointment, appointment_id)
+    await db.refresh(still_confirmed)
+    assert still_confirmed.status is AppointmentStatus.CONFIRMED
+
+
+# --- Rescheduling -----------------------------------------------------------
+async def test_reschedule_moves_the_appointment_atomically(db, clinic_data, settings) -> None:
+    availability = AvailabilityService(db, settings)
+    slots = await availability.search(
+        AvailabilityQuery(clinic_id=clinic_data.clinic.id, limit=50), clinic_data.tz
+    )
+    original_slot, new_slot = slots[0], slots[10]
+    service = AppointmentService(db, settings)
+
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=original_slot.id,
+        )
+    )
+    moved = await service.reschedule(booked.appointment.id, new_slot.id)
+
+    assert moved.id != booked.appointment.id
+    assert moved.start_time == new_slot.start_time
+    assert moved.status is AppointmentStatus.CONFIRMED
+
+    old = await db.get(Appointment, booked.appointment.id)
+    await db.refresh(old)
+    assert old.status is AppointmentStatus.CANCELLED
+    assert old.rescheduled_to_id == moved.id
+
+    freed = await db.get(AvailabilitySlot, original_slot.id)
+    taken = await db.get(AvailabilitySlot, new_slot.id)
+    await db.refresh(freed)
+    await db.refresh(taken)
+    assert freed.status is SlotStatus.AVAILABLE
+    assert taken.status is SlotStatus.BOOKED
+
+
+async def test_reschedule_onto_a_taken_slot_leaves_the_original_intact(
+    db, clinic_data, settings
+) -> None:
+    """The caller must not lose their appointment because the new slot went."""
+    availability = AvailabilityService(db, settings)
+    slots = await availability.search(
+        AvailabilityQuery(clinic_id=clinic_data.clinic.id, limit=50), clinic_data.tz
+    )
+    original_slot, contested = slots[0], slots[10]
+    service = AppointmentService(db, settings)
+
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=original_slot.id,
+        )
+    )
+    await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["nguyen"].id,
+            slot_id=contested.id,
+        )
+    )
+    appointment_id = booked.appointment.id
+    original_slot_id = original_slot.id
+
+    with pytest.raises(SlotUnavailableError):
+        await service.reschedule(appointment_id, contested.id)
+
+    unchanged = await db.get(Appointment, appointment_id)
+    await db.refresh(unchanged)
+    assert unchanged.status is AppointmentStatus.CONFIRMED
+    assert unchanged.availability_slot_id == original_slot_id
+
+
+async def test_reschedule_within_the_same_day_is_allowed(db, clinic_data, settings) -> None:
+    """Regression: the partial unique index on (patient, start) must not fire
+    when an appointment moves between two times on the same day."""
+    availability = AvailabilityService(db, settings)
+    tomorrow = (utc_now().astimezone(clinic_data.tz) + timedelta(days=1)).date()
+    slots = await availability.search(
+        AvailabilityQuery(
+            clinic_id=clinic_data.clinic.id,
+            practitioner_id=clinic_data.practitioners["patel"].id,
+            day=tomorrow,
+            period=DayPeriod.ANY,
+            limit=50,
+        ),
+        clinic_data.tz,
+    )
+    if len(slots) < 2:
+        pytest.skip("fixture did not produce two same-day slots")
+
+    service = AppointmentService(db, settings)
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slots[0].id,
+        )
+    )
+    moved = await service.reschedule(booked.appointment.id, slots[1].id)
+    assert moved.status is AppointmentStatus.CONFIRMED
+
+
+async def test_upcoming_excludes_cancelled_appointments(db, clinic_data, settings) -> None:
+    slot = await _first_available(db, clinic_data, settings)
+    service = AppointmentService(db, settings)
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+            source=BookingSource.RECEPTION,
+        )
+    )
+    assert len(await service.upcoming_for_patient(clinic_data.patients["hughes"].id)) == 1
+
+    await service.cancel(booked.appointment.id)
+    assert await service.upcoming_for_patient(clinic_data.patients["hughes"].id) == []

@@ -1,0 +1,103 @@
+# =============================================================================
+# Development stack: PostgreSQL, Redis and the backend.
+#
+#   docker compose up -d postgres redis      # data stores only
+#   docker compose up backend                # the API as well
+#
+# Ports match scripts/dev_services.sh (5433 / 6380) so you can switch between
+# Docker and the local non-Docker setup without editing .env.
+#
+# Later milestones add profiles for the LLM, speech and monitoring services;
+# they are declared below but not started by default, so no GPU image is pulled
+# before it is actually needed.
+# =============================================================================
+
+name: clinic-ai-callbot
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clinic_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clinic_app}
+      POSTGRES_DB: clinic_callbot
+      # scram-sha-256 rather than the default md5.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "127.0.0.1:5433:5432"      # loopback only — never expose a clinic DB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinic_app -d clinic_callbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Conversation state is transient by design: no persistence, and a bounded
+    # memory cap so a leak cannot take the host down.
+    command: >
+      redis-server
+      --save ""
+      --appendonly no
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+
+  backend:
+    build:
+      context: .
+      dockerfile: infrastructure/backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      APP_HOST: 0.0.0.0
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?set APP_SECRET_KEY in .env}
+      DATABASE_URL: postgresql+asyncpg://clinic_app:${POSTGRES_PASSWORD:-clinic_app}@postgres:5432/clinic_callbot
+      REDIS_URL: redis://redis:6379/0
+      CLINIC_TIMEZONE: ${CLINIC_TIMEZONE:-Australia/Melbourne}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+
+  # --- Later milestones (opt in with --profile) ------------------------------
+  # Milestone 2. CPU inference by default; a GPU image is not required to run
+  # a small instruct model for intent classification.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [llm]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  postgres_data:
+  ollama_models:
