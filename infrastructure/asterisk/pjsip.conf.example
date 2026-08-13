@@ -1,0 +1,127 @@
+;
+; PJSIP endpoints for local SIP testing — Phase A.
+;
+; Copy to pjsip.conf and substitute the ${...} placeholders from your
+; environment. NO REAL PASSWORDS IN THIS REPOSITORY.
+;
+; Generate strong per-endpoint secrets, e.g.:
+;     openssl rand -base64 24
+;
+
+; ---------------------------------------------------------------------------
+; Transport. Bound to the development host only.
+;
+; Do NOT bind 0.0.0.0 on a machine reachable from the internet. An exposed SIP
+; port is found by scanners within minutes and brute-forced for toll fraud —
+; see T13 in docs/security/threat-model.md.
+; ---------------------------------------------------------------------------
+[transport-udp]
+type=transport
+protocol=udp
+bind=127.0.0.1:5060
+; Production: prefer TLS, and set external_media_address/external_signaling_address
+; when behind NAT or an SBC.
+; protocol=tls
+; cert_file=${TLS_CERT_FILE}
+; priv_key_file=${TLS_KEY_FILE}
+
+
+; ---------------------------------------------------------------------------
+; Caller softphone (extension 200)
+; ---------------------------------------------------------------------------
+[200]
+type=endpoint
+context=clinic-internal
+disallow=all
+; G.711 only for Phase A: universally supported, low latency, no transcoding
+; surprises. Add compressed codecs only once the basics are proven.
+allow=ulaw
+allow=alaw
+auth=200-auth
+aors=200
+; Reject calls presenting caller ID we did not authenticate.
+trust_id_inbound=no
+; No direct media: Asterisk must stay in the audio path for AudioSocket to work.
+direct_media=no
+
+[200-auth]
+type=auth
+auth_type=userpass
+username=200
+password=${SIP_200_PASSWORD}
+
+[200]
+type=aor
+max_contacts=1
+remove_existing=yes
+
+
+; ---------------------------------------------------------------------------
+; Reception endpoint (transfer target, extension 100)
+; ---------------------------------------------------------------------------
+[reception]
+type=endpoint
+context=clinic-internal
+disallow=all
+allow=ulaw
+allow=alaw
+auth=reception-auth
+aors=reception
+direct_media=no
+
+[reception-auth]
+type=auth
+auth_type=userpass
+username=reception
+password=${SIP_RECEPTION_PASSWORD}
+
+[reception]
+type=aor
+max_contacts=1
+remove_existing=yes
+
+
+; ---------------------------------------------------------------------------
+; SIP trunk — Phase B only. Commented out deliberately: Milestone 4 is proven
+; on local SIP first, and a trunk is a billing and fraud surface.
+;
+; Before enabling: read the PSTN readiness section of
+; docs/architecture/telephony.md.
+; ---------------------------------------------------------------------------
+;[trunk]
+;type=endpoint
+;context=from-trunk          ; NOT clinic-internal — inbound must not reach
+;                            ; internal extensions or any outbound route
+;disallow=all
+;allow=ulaw
+;allow=alaw
+;outbound_auth=trunk-auth
+;aors=trunk
+;from_user=${SIP_TRUNK_USERNAME}
+;from_domain=${SIP_TRUNK_HOST}
+;direct_media=no
+;
+;[trunk-auth]
+;type=auth
+;auth_type=userpass
+;username=${SIP_TRUNK_USERNAME}
+;password=${SIP_TRUNK_PASSWORD}
+;
+;[trunk]
+;type=aor
+;contact=sip:${SIP_TRUNK_HOST}
+;
+;[trunk]
+;type=identify
+;endpoint=trunk
+;; Only accept traffic from the provider's signalling addresses. Without this,
+;; anyone who can reach the port can present themselves as the trunk.
+;match=${SIP_TRUNK_HOST}
+;
+;[trunk-registration]
+;type=registration
+;transport=transport-udp
+;outbound_auth=trunk-auth
+;server_uri=sip:${SIP_TRUNK_HOST}
+;client_uri=sip:${SIP_TRUNK_USERNAME}@${SIP_TRUNK_HOST}
+;retry_interval=60

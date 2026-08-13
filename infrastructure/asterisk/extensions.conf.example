@@ -1,0 +1,104 @@
+;
+; Dialplan for the clinic AI receptionist — Phase A, local SIP only.
+;
+; Copy to extensions.conf and substitute the ${...} placeholders. No real
+; credentials, numbers or trunk details belong in this repository.
+;
+; The security property this file provides: a transfer can only ever reach an
+; extension defined in [clinic-transfer], and that context contains no outbound
+; trunk. Even if the application were compromised into asking for an arbitrary
+; destination, Asterisk has nowhere to send it.
+;
+
+[globals]
+; Where the clinic AI's AudioSocket media server is listening. Loopback unless
+; Asterisk runs on a different host, in which case use the private media
+; network address — never a public one.
+AI_MEDIA_HOST=127.0.0.1
+AI_MEDIA_PORT=8090
+; Health endpoint the dialplan consults before trusting the AI with a caller.
+AI_HEALTH_URL=http://127.0.0.1:8000/health/live
+
+
+; ---------------------------------------------------------------------------
+; Where softphones live. Development only.
+; ---------------------------------------------------------------------------
+[clinic-internal]
+; 200 — the caller's softphone. Dials the AI.
+exten => 500,1,NoOp(caller reaching the clinic AI)
+ same => n,Goto(clinic-ai-entry,s,1)
+
+; 100 — the test "reception" endpoint, so transfers can be observed ringing.
+exten => 100,1,NoOp(reception)
+ same => n,Dial(PJSIP/reception,20)
+ same => n,Hangup()
+
+; Let softphones ring each other while testing the environment itself.
+exten => _2XX,1,Dial(PJSIP/${EXTEN},20)
+ same => n,Hangup()
+
+
+; ---------------------------------------------------------------------------
+; AI entry point, with the failure fallback that predates this milestone.
+;
+; **AI failure must never make the clinic unreachable.** Any uncertainty —
+; a slow health check, a malformed response, a Stasis app that is not
+; registered — routes the caller to a human instead of to silence.
+; ---------------------------------------------------------------------------
+[clinic-ai-entry]
+exten => s,1,NoOp(clinic AI entry)
+ same => n,Answer()
+ ; Short, hard timeout. A health check that is slow *is* a failure.
+ same => n,Set(CURL_TIMEOUT=1)
+ same => n,Set(AI_HEALTH=${CURL(${AI_HEALTH_URL})})
+ same => n,GotoIf($["${AI_HEALTH}" = ""]?fallback)
+ ; Hand the channel to the Stasis application. From here the clinic
+ ; application answers, bridges in AudioSocket media, and converses.
+ same => n,Stasis(${STASIS_APP})
+ ; Stasis returned without transferring: the app finished or failed.
+ same => n,Goto(fallback)
+
+ same => n(fallback),NoOp(AI unavailable - routing to reception)
+ same => n,Goto(clinic-transfer,100,1)
+
+exten => _[hit],1,Hangup()
+
+
+; ---------------------------------------------------------------------------
+; The ONLY context a transfer may reach.
+;
+; app/telephony/destinations.py resolves an approved TransferDestination enum
+; member to one of these extensions. There is deliberately no _X. pattern, no
+; outbound trunk and no Dial() to anything but a local endpoint: an extension
+; that is not written here cannot be reached, whatever the application asks for.
+; ---------------------------------------------------------------------------
+[clinic-transfer]
+; RECEPTION
+exten => 100,1,NoOp(transfer to reception)
+ same => n,Dial(PJSIP/reception,25)
+ ; Reception did not answer. Never send the caller back to the AI: they have
+ ; already asked for a person.
+ same => n,Goto(101,1)
+ same => n,Hangup()
+
+; VOICEMAIL
+exten => 101,1,NoOp(transfer to voicemail)
+ same => n,Playback(${VOICEMAIL_GREETING})
+ same => n,VoiceMail(${VOICEMAIL_BOX}@clinic,u)
+ same => n,Hangup()
+
+exten => _[hit],1,Hangup()
+
+
+; ---------------------------------------------------------------------------
+; Inbound from a SIP trunk — Phase B. Left commented until a provider and a
+; real DID exist. Do not enable this without the security review in
+; docs/architecture/telephony.md.
+; ---------------------------------------------------------------------------
+;[from-trunk]
+;exten => ${CLINIC_DID},1,NoOp(inbound PSTN call)
+; same => n,Goto(clinic-ai-entry,s,1)
+;
+;; Anything not addressed to the clinic's own number is dropped, so a
+;; misconfigured or probing trunk cannot walk the dialplan.
+;exten => _.,1,Hangup()

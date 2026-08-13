@@ -90,6 +90,44 @@ could have quietly become a data store:
 developer's terminal for work against the synthetic clinic. It writes nothing to
 disk and nothing to the logs.
 
+## What telephony adds (Milestone 4)
+
+Connecting real phone calls introduces exactly one new category of personal
+data — the caller's number — and no new audio retention.
+
+| Item | Retained? | Why |
+|---|---|---|
+| Call audio | **no** | in-memory PCM for one utterance, then discarded. `app_mixmonitor` and `res_monitor` are explicitly `noload`ed at the PBX |
+| Transcripts | **no** | unchanged: `RETAIN_TRANSCRIPTS=false` |
+| Caller number | in memory, for the life of the call | so a transfer can present it to reception. Never persisted, logged, prompted or used as a key |
+| `call_id` | in logs and the calls table | opaque 16-hex, no relationship to the caller |
+| Call timings, outcome | yes | operational metrics; no identifiers |
+| DTMF digits | in memory, bounded to 32, for the life of the call | future OTP entry; never logged |
+
+Three rules make this hold:
+
+- **The caller's number is never a log key.** `call_id` is.
+  `CallerIdentity.__repr__` redacts the number so a traceback cannot print it,
+  and `caller_number`, `caller_name`, `caller_id`, `connected_number`,
+  `dialed_number` and `sip_uri` were added to the log redactor as well.
+- **The caller's number never reaches the model.** Not in a prompt, not in
+  conversation memory. Only a salted fingerprint is derivable, with a
+  per-deployment salt — an unsalted hash of a 10-digit number is a lookup
+  table, not an anonymisation.
+- **Metric labels are closed sets** — a cause, a codec, an outcome. A phone
+  number as a label would turn `/health/metrics` into a caller log, and its
+  cardinality would grow with every call.
+
+**Unavoidable infrastructure metadata.** Asterisk keeps its own CDR and logs,
+and those *do* contain caller numbers — as the clinic's existing phone system
+already does. That is recorded here rather than glossed over: retention,
+access and rotation of PBX logs are a deployment decision, and they sit outside
+this application's control.
+
+**Caller ID is not authentication.** It is absent on withheld calls, shared
+across households and switchboards, forwarded, and trivially spoofed. Surname
+and date of birth remain the only route to `IDENTIFIED`.
+
 ## Where it lives
 
 | Store | Contents | Exposure |
@@ -98,6 +136,8 @@ disk and nothing to the logs.
 | Redis | conversation sessions, TTL-bounded | `127.0.0.1` only; no persistence (`--save "" --appendonly no`) |
 | Logs | redacted structured events | stderr |
 | Audio | never persisted — in-memory PCM, one utterance at a time | process memory only |
+| Caller number | in-memory for the call's duration; never written | process memory only |
+| Asterisk CDR/logs | caller numbers, call times — PBX infrastructure metadata | the PBX host, outside this application |
 | Metrics | counters and latency only | `/health/metrics` |
 
 ## Who can access it

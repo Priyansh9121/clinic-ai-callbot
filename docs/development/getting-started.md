@@ -55,9 +55,12 @@ uv run pytest --cov=app --cov-report=term-missing
 | `tests/security` | prompt injection (with and without the LLM), authorisation, input validation |
 | `tests/llm_live` | **opt-in.** Needs a real Ollama; run with `-m llm_live` |
 | `tests/voice_live` | **opt-in.** Needs the Whisper weights and a Piper voice; run with `-m voice_live` |
+| `tests/telephony` | call lifecycle, transfer, isolation, media over real loopback sockets. **No Asterisk needed** |
+| `tests/telephony_live` | **opt-in.** Needs a running Asterisk; run with `-m telephony_live` |
 
-`uv run pytest` deselects `llm_live` and `voice_live` automatically, so the
-suite passes on a machine with no model, no speech weights and no sound card.
+`uv run pytest` deselects `llm_live`, `voice_live` and `telephony_live`
+automatically, so the suite passes on a machine with no model, no speech
+weights, no sound card and no PBX.
 Voice orchestration itself is covered without any of that:
 `tests/conversation/test_voice_session.py` drives the real `VoiceSession` with
 fake audio devices and fake engines.
@@ -80,7 +83,9 @@ Integration tests create and drop the schema per test against
 | A new endpoint | a route in `api/routes/`, schemas in `schemas/`, logic in a service |
 | A new STT/TTS/VAD engine | a module under `app/speech/`, one branch in `speech/factory.py`. The provider Protocols do not change |
 | A new audio transport (telephony) | implement `AudioInput`/`AudioOutput` in `voice/transport.py` and pass them to `build_voice_session()`. `VoiceSession` must not learn about it |
-| An audio format conversion | `speech/audio.py` and nowhere else |
+| An audio format conversion | `speech/audio.py` and nowhere else — including telephone codecs |
+| A telephony transfer destination | a `TransferDestination` member, a config setting, and a dialplan extension in `[clinic-transfer]`. Never a string from anywhere else |
+| A new PBX integration | implement `CallController`; `VoiceSession` and the engine must not change |
 
 ## Conventions worth knowing
 
@@ -102,6 +107,11 @@ Integration tests create and drop the schema per test against
   debug dumps. If you need to hear what happened, play it — do not save it.
 - **Logs carry timings, not content.** Never log PCM, base64 audio, a
   transcript, or a patient-specific reply.
+- **`call_id` is the correlation key, never a phone number.** Caller ID is
+  personal data and is not authentication.
+- **Caller text can never become a dial string.** Transfers take a
+  `TransferTarget` produced from an enum, resolved from configuration, dialled
+  into a restricted dialplan context.
 
 ## Common problems
 
@@ -151,6 +161,17 @@ ends — measured mean probability 0.936 with the context, 0.008 without.
 **The first microphone access fails on macOS**
 That is TCC: the permission prompt appears on the *first* attempt and the
 attempt itself fails. Grant access and re-run.
+
+**Calls connect but the caller hears silence**
+Almost always a missing `chan_audiosocket` in that Asterisk build. Check with
+`uv run pytest -m telephony_live`, which asserts both AudioSocket modules are
+loaded — the failure is otherwise invisible until someone rings the number.
+
+**The agent's speech is choppy, or lags further behind as the call goes on**
+A pacing problem. Outbound audio is metered one 20 ms frame per 20 ms; if
+conversion moved back inside the pacer, soxr's batching emits ~104 ms bursts
+every ~100 ms. `tests/telephony/test_audio_transport.py` pins both the pacing
+and the uniform frame size.
 
 **A benchmark result looks too good**
 Make sure the circuit breaker is disabled for the run. A model emitting a few

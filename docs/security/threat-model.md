@@ -1,8 +1,9 @@
 # Threat model
 
 Scope: the text conversation API, appointment engine, clinic directory, the
-local LLM analyser and the local voice pipeline. Telephony is not yet present
-and is noted where it will change the picture.
+local LLM analyser, the local voice pipeline and the SIP telephony transport.
+
+Numbering note: T1–T12 predate Milestone 4. T13 onward are telephony.
 
 ## T1 — Prompt injection through caller speech
 
@@ -268,6 +269,174 @@ developer's terminal and writes nothing.
 
 **Verified by** the cache allowlist tests, and by
 `test_metrics_contain_no_content`.
+
+## T13 — SIP credential compromise
+
+**Attack.** An attacker obtains a SIP endpoint password, the ARI password, or
+(in Phase B) trunk credentials — from a committed config file, a log line, a
+backup, or by brute force against an exposed port.
+
+**Mitigations.** No credential is in the repository: every config template ships
+`${PLACEHOLDER}` values and `.env` is gitignored. ARI's password is a
+`SecretStr`, so it does not appear in reprs or logs, and `AriClient` never logs
+its own URL with a query string attached — ARI accepts the API key as a URL
+parameter, which is precisely the sort of thing that ends up in a log file.
+Templates instruct generating secrets with `openssl rand`, not choosing them.
+Asterisk's HTTP and SIP ports bind to loopback in the shipped configuration.
+
+**Residual risk.** Credentials still live in a `.env` on the host. A real
+deployment needs a secret store and rotation. An exposed SIP port is found by
+scanners within minutes, so **never** put a development PBX on the internet to
+make a demo work.
+
+## T14 — Toll fraud
+
+**Attack.** The classic PBX payday: get the system to place calls to
+premium-rate or international numbers, either by compromising a SIP account or
+by persuading the AI to dial something. "Call this number for me."
+
+**Why it fails structurally.** There is no code path from any caller-derived
+value to a dial string. `CallController.transfer()` accepts a `TransferTarget`,
+which can only be produced by `DestinationRegistry.resolve()` from a
+`TransferDestination` enum member — of which there are two, both local
+extensions read from configuration. A transcript, an LLM completion or a DTMF
+sequence cannot become a destination, because no function accepts one.
+
+Configuration cannot smuggle one in either: extensions are validated at load
+against `^[A-Za-z0-9_-]{1,20}$`, so `9,0011447700900000`, a SIP URI or an
+Asterisk argument separator is rejected before the app starts.
+
+The dialplan is the last barrier: `[clinic-transfer]` contains the approved
+extensions and no outbound trunk, so even a fully compromised application has
+nowhere to send a call.
+
+**Verified by** `tests/telephony/test_call_lifecycle.py` — spoken injection
+payloads asserted to produce no transfer outside the allowlist, plus
+configuration-level tests that unsafe extensions are refused.
+
+**Residual risk.** Phase B adds a trunk with real billing. Before then:
+IP-allowlist the provider, alert on unusual call volume, and cap concurrent
+channels at the provider.
+
+## T15 — Caller ID spoofing
+
+**Attack.** Present a patient's number as the calling number and be treated as
+that patient.
+
+**Why it fails.** Caller ID is never authentication here. It is not used to look
+up a patient, not used to raise a verification level, and not given to the
+model. Surname plus date of birth remains the only route to `IDENTIFIED`, and
+Milestone 5's OTP the only route to `VERIFIED`. Caller ID is also absent on
+withheld calls, shared across households and switchboards, and forwarded — so
+trusting it would be wrong even without an attacker.
+
+**Verified by** `test_caller_id_does_not_identify_the_patient`.
+
+## T16 — SIP flooding and registration attacks
+
+**Attack.** INVITE floods, registration brute-forcing, or malformed SIP to
+exhaust the PBX.
+
+**Mitigations.** This is Asterisk's problem and is left to Asterisk, which is
+the point of not writing a SIP stack in Python. The shipped configuration binds
+to loopback, loads only `chan_pjsip` (leaving `chan_sip` unloaded, halving the
+SIP attack surface), and keeps the RTP port range small. Production needs
+`fail2ban` or equivalent, provider IP allowlisting, and TLS.
+
+The application layer bounds its own exposure independently:
+`TELEPHONY_MAX_ACTIVE_CALLS` refuses work beyond capacity, and refusing is
+safe — the dialplan's health-check failover routes those callers to reception.
+
+**Residual risk.** A PBX-level flood degrades telephony regardless of what the
+application does. The mitigation is that an AI failure must never make the
+clinic unreachable: Asterisk routes to reception when we do not answer.
+
+## T17 — Media injection and hostile audio
+
+**Attack.** Something reaches the AudioSocket port and injects audio into a
+live call, or sends malformed frames to crash or exhaust the media handler.
+
+**Mitigations.** **AudioSocket has no authentication of any kind** — this is a
+property of the protocol, not an oversight — so the port binds to `127.0.0.1`
+by default and belongs on a private media network when Asterisk is remote. This
+is stated in the module docstring, the config templates and the status command,
+because it is the single easiest thing to get wrong.
+
+Connections are attributed by the UUID Asterisk sends as its first frame; one
+that cannot be attributed is closed rather than attached to a call. Frame
+parsing is bounded: the 2-byte length field is checked against
+`MAX_REASONABLE_AUDIO_BYTES` **before** allocating, unknown frame types are
+skipped without desynchronising the stream, and a protocol violation ends that
+call's media rather than propagating. The inbound queue is bounded and drops
+oldest-first, so a producer faster than the consumer costs stale audio, never
+unbounded memory.
+
+**Verified by** the malformed-frame, oversized-length, flood and
+partial-frame tests in `tests/telephony/test_audio_transport.py`.
+
+**Residual risk.** Anything that can reach the media port can still inject
+audio into a call in progress. Network placement is the control.
+
+## T18 — Unauthorised or unexpected transfer
+
+**Attack.** Get the caller sent somewhere they should not go — an attacker's
+extension, an outside line, or a loop back into the AI after they asked for a
+human.
+
+**Mitigations.** As T14: destinations are an enum, resolved from configuration,
+dialled into a restricted context. Beyond that, the *reason* for a transfer is
+mapped to a destination by a closed table in `app/telephony/destinations.py`,
+not by anything the model produces. A failed transfer returns the caller to the
+agent with approved wording rather than dropping them, and the dialplan sends an
+unanswered transfer to voicemail — never back into the AI, which would trap
+someone who has already asked for a person.
+
+`TransferReason.SAFETY` maps to reception, **not** to emergency services. No
+code path dials 000; the SafetyEngine advises the caller to do so themselves.
+
+## T19 — Call and session crossover
+
+**Attack.** Or, more likely, a bug: caller B is attached to caller A's
+conversation and hears their appointment details.
+
+**Mitigations.** Every call gets its own `call_id`, `VoiceSession`,
+`ConversationSession`, database session, engine, media channel and VAD state.
+Media sockets are matched to calls by a per-call UUID, so a connection cannot
+attach to the wrong call. Nothing is keyed by phone number — two callers from
+one switchboard are two calls. The per-service registries are instance state,
+not class state; a shared mutable class attribute here would be exactly this
+bug, and one was caught during implementation.
+
+**Verified by** the two- and five-simultaneous-call tests, and by
+`test_audio_from_one_call_never_reaches_another`, which gives each caller a
+different reply and asserts the byte streams differ.
+
+**Residual risk.** Concurrent calls require separate `ConversationEngine`
+instances. Sharing one serialises them on a single `AsyncSession` — measured:
+the second caller receives no audio. This is a correctness requirement on
+whoever constructs the sessions, pinned by a test.
+
+## T20 — Telephony metadata leakage
+
+**Attack.** Caller numbers accumulate in logs, metrics, CDRs or crash dumps.
+
+**Mitigations.** The correlation key is `call_id`, an opaque 16-hex value with
+no relationship to the caller. `CallerIdentity.__repr__` redacts the number so
+a traceback or a debugger cannot print it, and `caller_number`, `caller_name`,
+`caller_id`, `connected_number`, `dialed_number` and `sip_uri` were added to
+the log redactor as defence in depth. Metric labels are closed sets — a cause,
+a codec, an outcome — never a number or a patient id. The number is not put in
+a prompt or in conversation memory; only a **salted** fingerprint is derivable,
+per deployment, because an unsalted hash of a 10-digit number is a lookup table.
+
+**Verified by** `test_call_metrics_carry_no_caller_identity`,
+`test_caller_identity_never_exposes_the_number` and the redaction test.
+
+**Residual risk.** Asterisk keeps its own CDR and logs, which do contain caller
+numbers — that is infrastructure metadata the clinic already holds for its
+phone system. Retention and access are a deployment decision;
+`docs/privacy/data-inventory.md` records it as unavoidable rather than pretending
+otherwise.
 
 ## Out of scope here
 

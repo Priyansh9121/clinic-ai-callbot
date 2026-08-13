@@ -156,6 +156,107 @@ def pad_to_frame(pcm: bytes, frame_bytes: int = FRAME_BYTES) -> bytes:
     return pcm if remainder == 0 else pcm + b"\x00" * (frame_bytes - remainder)
 
 
+# --- Telephone codecs (G.711) -----------------------------------------------
+# A phone leg is 8 kHz G.711, and every conversion between that and the
+# canonical format happens here — the same rule that already applies to
+# resampling. A μ-law decoder that grows a second home in the telephony
+# adapter is how two subtly different decoders end up in one codebase.
+#
+# Tables are built once on first use rather than at import, so the text-only
+# deployment does not pay for a codec it never runs.
+_ULAW_BIAS = 0x84
+_ULAW_CLIP = 32635
+_ALAW_CLIP = 32635
+_ULAW_DECODE: np.ndarray | None = None
+_ULAW_ENCODE: np.ndarray | None = None
+_ALAW_DECODE: np.ndarray | None = None
+_ALAW_ENCODE: np.ndarray | None = None
+
+
+def _build_ulaw_tables() -> tuple[np.ndarray, np.ndarray]:
+    codes = np.arange(256, dtype=np.int32)
+    inverted = ~codes & 0xFF
+    mantissa = inverted & 0x0F
+    exponent = (inverted >> 4) & 0x07
+    magnitude = (((mantissa << 3) + _ULAW_BIAS) << exponent) - _ULAW_BIAS
+    decode = np.where(inverted & 0x80, -magnitude, magnitude).astype(np.int16)
+
+    # Encode by exhaustive table over every int16 value (64 KB). Exact by
+    # construction and a single numpy index at call time.
+    samples = np.arange(-32768, 32768, dtype=np.int32)
+    sign = np.where(samples < 0, 0x80, 0x00)
+    magnitude = np.minimum(np.abs(samples), _ULAW_CLIP) + _ULAW_BIAS
+    exponent = np.clip(np.floor(np.log2(magnitude)).astype(np.int32) - 7, 0, 7)
+    mantissa = (magnitude >> (exponent + 3)) & 0x0F
+    encode = (~(sign | (exponent << 4) | mantissa) & 0xFF).astype(np.uint8)
+    return decode, encode
+
+
+def _build_alaw_tables() -> tuple[np.ndarray, np.ndarray]:
+    codes = np.arange(256, dtype=np.int32)
+    toggled = codes ^ 0x55
+    mantissa = toggled & 0x0F
+    exponent = (toggled >> 4) & 0x07
+    magnitude = np.where(
+        exponent == 0,
+        (mantissa << 4) + 8,
+        ((mantissa << 4) + 0x108) << (exponent - 1),
+    )
+    # In A-law the sign bit is set for *positive* values — the opposite of
+    # μ-law's inverted convention. Getting this backwards still round-trips
+    # byte-for-byte, so it only shows up as inverted-phase audio: measured
+    # -11.5 dB SNR against the source sine.
+    decode = np.where(toggled & 0x80, magnitude, -magnitude).astype(np.int16)
+
+    # Follows the ITU-T G.711 reference encoder. Three details are easy to get
+    # wrong and none of them break the round trip loudly:
+    #   * A-law quantises in the 13-bit domain, so the input is shifted first;
+    #   * negatives fold as ``-v - 1``, not ``abs(v)``;
+    #   * segments 0 and 1 share a mantissa shift, unlike every later segment.
+    samples = np.arange(-32768, 32768, dtype=np.int32)
+    folded = samples >> 3
+    mask = np.where(folded >= 0, 0xD5, 0x55)
+    folded = np.where(folded >= 0, folded, -folded - 1)
+
+    segment_ends = np.array([0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF], dtype=np.int32)
+    segment = np.searchsorted(segment_ends, folded, side="left").astype(np.int32)
+    shift = np.where(segment < 2, 1, segment)
+    encode = (((segment << 4) | ((folded >> shift) & 0x0F)) ^ mask).astype(np.uint8)
+    return decode, encode
+
+
+def ulaw_to_pcm16(data: bytes) -> bytes:
+    """Decode G.711 μ-law to 16-bit linear PCM at the *same* sample rate."""
+    global _ULAW_DECODE, _ULAW_ENCODE
+    if _ULAW_DECODE is None:
+        _ULAW_DECODE, _ULAW_ENCODE = _build_ulaw_tables()
+    return _ULAW_DECODE[np.frombuffer(data, dtype=np.uint8)].tobytes()
+
+
+def pcm16_to_ulaw(pcm: bytes) -> bytes:
+    """Encode 16-bit linear PCM to G.711 μ-law at the *same* sample rate."""
+    global _ULAW_DECODE, _ULAW_ENCODE
+    if _ULAW_ENCODE is None:
+        _ULAW_DECODE, _ULAW_ENCODE = _build_ulaw_tables()
+    return _ULAW_ENCODE[to_int16_array(pcm).astype(np.int32) + 32768].tobytes()
+
+
+def alaw_to_pcm16(data: bytes) -> bytes:
+    """Decode G.711 A-law to 16-bit linear PCM at the *same* sample rate."""
+    global _ALAW_DECODE, _ALAW_ENCODE
+    if _ALAW_DECODE is None:
+        _ALAW_DECODE, _ALAW_ENCODE = _build_alaw_tables()
+    return _ALAW_DECODE[np.frombuffer(data, dtype=np.uint8)].tobytes()
+
+
+def pcm16_to_alaw(pcm: bytes) -> bytes:
+    """Encode 16-bit linear PCM to G.711 A-law at the *same* sample rate."""
+    global _ALAW_DECODE, _ALAW_ENCODE
+    if _ALAW_ENCODE is None:
+        _ALAW_DECODE, _ALAW_ENCODE = _build_alaw_tables()
+    return _ALAW_ENCODE[to_int16_array(pcm).astype(np.int32) + 32768].tobytes()
+
+
 # --- WAV (developer tooling only) -------------------------------------------
 def wav_bytes(pcm: bytes, sample_rate_hz: int = SAMPLE_RATE_HZ) -> bytes:
     """Wrap canonical PCM in a WAV container, in memory.

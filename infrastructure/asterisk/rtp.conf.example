@@ -1,0 +1,15 @@
+;
+; RTP media ports. Copy to rtp.conf.
+;
+; Keep the range small: every port here must be open in the firewall, and a
+; wide range is a wide attack surface. 100 ports supports ~50 concurrent calls,
+; far beyond what the local development machine can transcribe anyway.
+;
+[general]
+rtpstart=10000
+rtpend=10100
+
+; Development is loopback-only, so no NAT configuration is needed. Behind NAT
+; in production, set these to the public address and the internal network:
+; icesupport=no
+; stunaddr=

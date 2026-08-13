@@ -185,3 +185,28 @@ class M:
     AUDIO_INPUT_QUEUE_DEPTH = "audio.input_queue_depth"
     TTS_FIRST_AUDIO = "speech.tts_first_audio_latency"
     BARGE_IN = "speech.barge_in"
+
+    # --- Telephony (Milestone 4) -------------------------------------------
+    # Labels here are closed sets only — a cause, a codec, an outcome. A phone
+    # number, caller name, patient id, appointment id or SIP URI as a label
+    # would turn the metrics endpoint into a caller log, and cardinality would
+    # grow with every call. `call_id` is for structured logs, not metrics.
+    TELEPHONY_CALLS_STARTED = "telephony.calls_started"
+    TELEPHONY_CALLS_ANSWERED = "telephony.calls_answered"
+    TELEPHONY_CALLS_COMPLETED = "telephony.calls_completed"
+    TELEPHONY_CALLS_FAILED = "telephony.calls_failed"
+    TELEPHONY_CALLS_REJECTED = "telephony.calls_rejected"
+    TELEPHONY_CALLS_TRANSFERRED = "telephony.calls_transferred"
+    TELEPHONY_TRANSFER_FAILED = "telephony.transfer_failed"
+    TELEPHONY_ACTIVE_CALLS = "telephony.active_calls"
+    TELEPHONY_CALL_DURATION = "telephony.call_duration"
+    TELEPHONY_ANSWER_TO_FIRST_AUDIO = "telephony.answer_to_first_audio"
+    TELEPHONY_INBOUND_FRAMES = "telephony.inbound_audio_frames"
+    TELEPHONY_OUTBOUND_FRAMES = "telephony.outbound_audio_frames"
+    TELEPHONY_AUDIO_OVERRUN = "telephony.audio_overrun"
+    TELEPHONY_AUDIO_UNDERRUN = "telephony.audio_underrun"
+    TELEPHONY_BARGE_IN_LATENCY = "telephony.barge_in_latency"
+    TELEPHONY_MEDIA_ERROR = "telephony.media_error"
+    TELEPHONY_DISCONNECTS = "telephony.disconnects"
+    TELEPHONY_PBX_RECONNECTS = "telephony.pbx_reconnects"
+    TELEPHONY_DTMF = "telephony.dtmf_received"

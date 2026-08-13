@@ -390,6 +390,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+telephony = [
+    { name = "websockets" },
+]
 voice = [
     { name = "faster-whisper" },
     { name = "numpy" },
@@ -418,8 +421,9 @@ requires-dist = [
     { name = "piper-tts", marker = "extra == 'voice'", specifier = ">=1.6.0" },
     { name = "sounddevice", marker = "extra == 'voice'", specifier = ">=0.5.5" },
     { name = "soxr", marker = "extra == 'voice'", specifier = ">=1.1.0" },
+    { name = "websockets", marker = "extra == 'telephony'", specifier = ">=13.0" },
 ]
-provides-extras = ["voice"]
+provides-extras = ["voice", "telephony"]
 
 [package.metadata.requires-dev]
 dev = [

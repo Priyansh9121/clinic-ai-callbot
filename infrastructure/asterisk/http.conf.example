@@ -1,0 +1,15 @@
+;
+; Asterisk's built-in HTTP server, which serves ARI. Copy to http.conf.
+;
+; Bound to loopback. ARI carries the credential as HTTP Basic auth, so exposing
+; this port is equivalent to exposing the ability to answer, redirect and hang
+; up every call on the PBX.
+;
+[general]
+enabled=yes
+bindaddr=127.0.0.1
+bindport=8088
+; Production: terminate TLS here or in front of it.
+; tlsenable=yes
+; tlsbindaddr=127.0.0.1:8089
+; tlscertfile=${TLS_CERT_FILE}

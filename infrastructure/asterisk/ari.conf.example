@@ -1,0 +1,19 @@
+;
+; Asterisk REST Interface — the clinic application's control channel.
+; Copy to ari.conf and substitute the placeholder.
+;
+; This user can answer, hang up and redirect calls. Treat the password as a
+; production credential even in development: generate it, do not choose it.
+;     openssl rand -base64 24
+;
+[general]
+enabled=yes
+pretty=no
+; Do not allow ARI to originate to arbitrary endpoints from outside the app.
+allowed_origins=
+
+[clinic-ai]
+type=user
+read_only=no
+password=${ASTERISK_ARI_PASSWORD}
+password_format=plain

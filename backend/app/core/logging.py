@@ -43,6 +43,15 @@ SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
     "message_text",
     "caller_text",
     "reply_text",
+    # Telephony (Milestone 4). Caller ID is personal data and is never a log
+    # correlation key — `call_id` is. These are belt-and-braces: the telephony
+    # layer does not pass a caller number to a logger in the first place.
+    "caller_number",
+    "caller_name",
+    "caller_id",
+    "connected_number",
+    "dialed_number",
+    "sip_uri",
 )
 
 REDACTED = "[redacted]"

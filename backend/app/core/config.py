@@ -180,9 +180,45 @@ class Settings(BaseSettings):
     voice_input_device: str = ""
     voice_output_device: str = ""
 
+    # --- Telephony (Milestone 4) -------------------------------------------
+    # Off unless an ARI user is configured, so the text and local-voice
+    # deployments need no PBX. See docs/architecture/telephony.md.
+    telephony_enabled: bool = False
     asterisk_ari_url: str = "http://127.0.0.1:8088/ari"
     asterisk_ari_user: str = ""
     asterisk_ari_password: SecretStr = SecretStr("")
+    #: Stasis application name. Must match the dialplan's Stasis() argument.
+    asterisk_app_name: str = "clinic-ai"
+
+    # AudioSocket media server. Loopback by default: the protocol carries no
+    # credential, so anything that can reach this port can inject audio into a
+    # live call. Across hosts it belongs on a private media network.
+    telephony_media_host: str = "127.0.0.1"
+    telephony_media_port: int = 8090
+    #: Wire format of the media leg: slin | slin16 | pcmu | pcma. slin16 avoids
+    #: resampling entirely where the dialplan can raise the channel format.
+    telephony_wire_format: Literal["slin", "slin16", "pcmu", "pcma"] = "slin"
+    #: soxr quality for 8 kHz <-> 16 kHz conversion. Lower settings have much
+    #: less filter delay; see the telephone-band benchmark before changing.
+    telephony_resample_quality: str = "HQ"
+
+    # Transfer. Extensions are validated as bare dialplan extensions at load,
+    # and the context is transfer-only — no outbound trunk is reachable from it.
+    telephony_transfer_context: str = "clinic-transfer"
+    reception_extension: str = "100"
+    voicemail_extension: str = "101"
+
+    #: Concurrent calls this machine will accept. Local STT and LLM inference
+    #: are the real limit, not the transport — measure before raising it.
+    telephony_max_active_calls: int = 2
+    #: What happens at capacity: reject (dialplan failover routes to reception)
+    #: or transfer_reception. A clinic policy decision, not a code default.
+    telephony_capacity_policy: Literal["reject", "transfer_reception"] = "reject"
+    #: Drain before releasing the channel, so a goodbye is not clipped.
+    telephony_hangup_drain_ms: int = 250
+    #: Salt for the caller-number fingerprint. An unsalted hash of a 10-digit
+    #: number is a lookup table, not an anonymisation. Set per deployment.
+    telephony_caller_salt: SecretStr = SecretStr("change-me-per-deployment")
 
     # --- Derived helpers ---------------------------------------------------
     @property
@@ -227,6 +263,22 @@ class Settings(BaseSettings):
             self.stt_provider != "none"
             and self.tts_provider != "none"
             and self.vad_provider != "none"
+        )
+
+    @property
+    def telephony_configured(self) -> bool:
+        """Whether inbound calls can actually be served.
+
+        Telephony needs the voice pipeline *and* a PBX to talk to. A partial
+        configuration answering calls it cannot converse on would be worse than
+        not answering, because the dialplan's failover to reception only fires
+        when we decline.
+        """
+        return (
+            self.telephony_enabled
+            and self.voice_configured
+            and bool(self.asterisk_ari_user)
+            and bool(self.asterisk_ari_password.get_secret_value())
         )
 
     def device_or_default(self, configured: str) -> int | str | None:

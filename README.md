@@ -6,13 +6,19 @@ callers to a human when it should, and redirects medical emergencies to Triple
 Zero — without letting a language model control anything clinical or
 transactional.
 
-> **Status: Milestones 1, 2 and 3 complete.** The conversation engine,
-> appointment engine, safety engine and APIs work end to end over text; a local
-> LLM improves natural-language understanding behind the same analyser
-> interface; and you can now hold a spoken, interruptible conversation with it
-> through a local microphone and speaker. Everything — speech recognition,
-> synthesis and the language model — runs on the machine. There is no telephony
-> yet — see [Implementation status](#implementation-status).
+> **Status: Milestones 1–3 complete; Milestone 4 implemented, awaiting manual
+> SIP acceptance.** The conversation engine, appointment engine, safety engine
+> and APIs work end to end over text; a local LLM improves natural-language
+> understanding behind the same analyser interface; you can hold a spoken,
+> interruptible conversation through a local microphone; and a SIP telephony
+> transport makes a phone call behave like that same voice session. Everything
+> — speech recognition, synthesis and the language model — runs on the machine.
+>
+> The telephony transport has **not** been exercised against a live Asterisk in
+> this environment (see [Implementation status](#implementation-status)); its
+> media path is covered by tests over real sockets, and
+> [`docs/development/local-sip.md`](docs/development/local-sip.md) carries the
+> manual acceptance script.
 >
 > **All data in this repository is fictional.** "Riverside Medical Clinic", its
 > practitioners and its patients are synthetic development fixtures. This
@@ -163,6 +169,23 @@ will hear once speech is attached.
 
 Try `/state` to see the structured conversation memory, `/new` to restart.
 
+## Answer a phone call
+
+Milestone 4 adds a SIP transport. Asterisk owns all SIP; the application
+consumes ARI for call control and AudioSocket for media, and the existing voice
+pipeline runs unchanged.
+
+```bash
+uv run python scripts/telephony_status.py       # config + PBX reachability
+cd backend && uv run pytest tests/telephony -q  # 72 tests, no Asterisk needed
+uv run pytest -m telephony_live -q              # needs a running PBX
+```
+
+Asterisk is not installed on the development machine this was built on, and
+deliberately so — see
+[docs/development/local-sip.md](docs/development/local-sip.md) for why, how to
+run one, and the manual acceptance script.
+
 ## Talk to it out loud
 
 ```bash
@@ -227,6 +250,15 @@ backend/app/
 ├── schemas/          Pydantic request/response models
 ├── security/         auth + RBAC, rate limiting, security headers
 ├── services/         call metadata
+├── telephony/        SIP transport (Milestone 4)
+│   ├── states.py       call lifecycle — the third state domain
+│   ├── destinations.py the transfer allowlist
+│   ├── control.py      CallController protocol (signalling only)
+│   ├── audiosocket.py  AudioSocket wire protocol
+│   ├── transport.py    AudioInput/AudioOutput over a call, with pacing
+│   ├── ari.py          Asterisk REST interface client
+│   ├── manager.py      one call = one isolated session
+│   └── service.py      call setup, wiring control to media
 ├── speech/           VAD, STT, TTS engines behind the Milestone 1 interfaces
 │   ├── audio.py        the canonical audio format — the only conversion point
 │   ├── vad/            Silero ONNX + a dependency-free energy fallback
@@ -248,6 +280,10 @@ Deviations from the originally specified layout, and why:
 | Added `NEW_PATIENT_DETAILS` state | Collecting details for someone who is *not yet* a patient is a different task from verifying one who is; folding both into `VERIFY_PATIENT` made that state ambiguous. |
 | `conversation/handlers/` holds one module per *flow*, not per state | 24 states, 4 tasks. Per-state classes would have duplicated the slot-filling logic four times over. |
 | `conversation/vocabulary.py` added | Entity extraction needs clinic records to resolve against. Keeping the loader separate keeps the NLU pure and testable. |
+
+`app/telephony/` is an adapter around `app/voice/`, which is itself an adapter
+around the text engine. A phone call, a microphone and an HTTP request all
+arrive at the same `handle_message(session_id, text)`.
 
 `app/voice/` is an *adapter*, not a second engine. It calls the unchanged text
 seam — `handle_message(session_id, text)` — so every clinic, safety and
@@ -416,6 +452,32 @@ was rejected: it heard *"my face has gone **down** on one side"* for "gone
 Method, per-stage breakdown and the TTS voice comparison:
 [`docs/architecture/voice-pipeline.md`](docs/architecture/voice-pipeline.md).
 
+### Speech recognition over a telephone line
+
+The clean-audio numbers above do not automatically survive a phone call.
+`scripts/benchmark_telephony_stt.py` puts the same phrases through
+16 kHz → 8 kHz → G.711 → 16 kHz, with optional line noise.
+
+| Set | Clean | Phone (codec only) | Phone (−30 dBFS noise) |
+|---|---|---|---|
+| safety keywords kept | 10/10 | **10/10** | **10/10** |
+| booking WER | 1.4% | 1.4% | 1.4% |
+| identity WER | 52.8% | 49.8% | **69.8%** |
+| Australian speech WER | 12.7% | 15.8% | **38.1%** |
+| DOB/phone recovered by the real parsers | 3/3 | 3/3 | **1/3** |
+
+**Safety phrases survive; structured data does not.** "Chest pain" and "can't
+breathe" are long and lexically distinctive, and came through every condition
+tested. Dates, phone numbers and names did not — on a noisy line the production
+parsers recovered one field in three, and "half past two" came back as "Hot,
+Hot, Hot too".
+
+That shapes the design rather than being a tuning problem: the read-back
+confirmation before every booking is doing real work over the phone, identity
+must not depend on spelling a name aloud, and DTMF is the right answer for
+numeric entry. The transport already delivers keypad digits as structured
+input.
+
 ## Environment variables
 
 Every variable is documented in [`.env.example`](.env.example). The ones worth
@@ -465,7 +527,8 @@ change is an explicit operational step, not a side effect of a restart.
 | 1 | Database, appointments, conversation engine, safety, text API, simulator, tests | **complete** |
 | 2 | Local LLM behind the analyser interface, strict validation, hint resolution, fallback, shadow mode, benchmark | **complete** |
 | 3 | STT, TTS, VAD, streaming audio, barge-in, latency metrics | **complete** |
-| 4 | Asterisk, PJSIP, external media gateway, AI-failure fallback | not started |
+| 4 | Asterisk/PJSIP transport, ARI call control, AudioSocket media, transfer, call isolation | **implemented — manual SIP acceptance outstanding** |
+| 4B | SIP trunk, Australian DID, PSTN cutover | not started (deployment step) |
 | 5 | OTP verification, staff dashboard, RBAC UI, load and red-team testing | partial (RBAC + audit trail exist) |
 
 ## Known limitations
@@ -506,6 +569,19 @@ change is an explicit operational step, not a side effect of a restart.
   better-enunciated and noise-free compared with a real caller on a real line.
   Treat every accuracy figure as an upper bound. A clinic-recorded set, under
   consent, is needed before deployment.
+- **The telephony transport has never run against a live Asterisk.** The media
+  path, framing, pacing, codec conversion, call lifecycle, transfer allowlist
+  and session isolation are covered by 72 automated tests — the media ones over
+  real TCP sockets speaking the real AudioSocket protocol — but the ARI call
+  setup sequence has not been executed against a PBX. Manual SIP acceptance is
+  outstanding; the script is in `docs/development/local-sip.md`.
+- **End-to-end telephone latency is unmeasured.** The Milestone 3 figure of
+  1135 ms is the floor; a call adds the SIP leg, Asterisk buffering and
+  resampler filter delay in both directions. No end-to-end number is claimed.
+- **Telephony barge-in is measured only to the edge of our process.** Playback
+  stops in under a millisecond and pacing bounds un-recallable audio to roughly
+  one 20 ms frame, but what a caller *hears* also includes Asterisk and the
+  network. That needs a real call and a human ear.
 - **Barge-in on open speakers makes the agent interrupt itself.** The
   microphone is deliberately never gated on playback, so it hears the speaker.
   Use headphones, or raise `VOICE_BARGE_IN_FRAMES`. Acoustic echo cancellation

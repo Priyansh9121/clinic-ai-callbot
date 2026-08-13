@@ -111,6 +111,14 @@ TRANSFER_MESSAGES: dict[TransferReason, str] = {
     ),
 }
 
+#: Spoken when the telephony layer could not complete a transfer to a human.
+#: The caller is still on the line and must be told something — dropping them
+#: after they have asked for a person is the worst available outcome.
+TRANSFER_UNAVAILABLE = (
+    "I'm sorry, I can't put you through just now. "
+    "Please call the clinic again shortly and reception will help you."
+)
+
 GOODBYE = "Thanks for calling. Goodbye."
 GOODBYE_AFTER_BOOKING = "You're all set. Thanks for calling."
 

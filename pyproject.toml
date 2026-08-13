@@ -23,6 +23,12 @@ voice = [
     "sounddevice>=0.5.5",
     "soxr>=1.1.0",
 ]
+# Telephony (Milestone 4). Only the ARI event stream needs anything extra —
+# the AudioSocket media protocol is implemented directly over asyncio streams,
+# and Asterisk does all the SIP.
+telephony = [
+    "websockets>=13.0",
+]
 
 [dependency-groups]
 dev = [

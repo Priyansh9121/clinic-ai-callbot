@@ -130,6 +130,56 @@ async def _voice_components(settings: AppSettings) -> list[HealthComponent]:
     return components
 
 
+async def _telephony_components(request: Request, settings: AppSettings) -> list[HealthComponent]:
+    """Per-component telephony status: pbx, media, capacity.
+
+    Split the same way as voice, because the failure modes differ: the PBX
+    being unreachable stops new calls arriving, while the media server not
+    listening means calls arrive and then hear nothing.
+    """
+    if not settings.telephony_enabled:
+        return [HealthComponent(name="telephony", status="not_configured", detail="disabled")]
+    if not settings.telephony_configured:
+        return [
+            HealthComponent(
+                name="telephony",
+                status="not_configured",
+                detail="voice providers or ARI credentials missing",
+            )
+        ]
+
+    components: list[HealthComponent] = []
+    service = getattr(request.app.state, "telephony", None)
+    if service is None:
+        return [HealthComponent(name="telephony", status="down", detail="service not started")]
+
+    ari = getattr(service, "_ari", None)
+    connected = bool(getattr(ari, "is_connected", False))
+    components.append(
+        HealthComponent(
+            name="telephony_pbx",
+            status="ok" if connected else "down",
+            detail=f"ari app={settings.asterisk_app_name}",
+        )
+    )
+    components.append(
+        HealthComponent(
+            name="telephony_media",
+            status="ok" if service.is_listening else "down",
+            detail=f"audiosocket {settings.telephony_wire_format} port={service.media_port}",
+        )
+    )
+    manager = service.manager
+    components.append(
+        HealthComponent(
+            name="telephony_capacity",
+            status="ok" if not manager.at_capacity else "degraded",
+            detail=f"{manager.active_calls}/{manager.max_active_calls} active",
+        )
+    )
+    return components
+
+
 def _audio_device_components(settings: AppSettings) -> list[HealthComponent]:
     """Local sound-card availability. Only meaningful for the local demo."""
     if not settings.voice_configured:
@@ -202,10 +252,17 @@ async def health(
 
     components.append(await _llm_component(request, settings))
     components.extend(await _voice_components(settings))
+    components.extend(await _telephony_components(request, settings))
 
     # Only components required to serve a text conversation gate the status.
-    # The LLM and the whole voice stack are deliberately excluded: losing them
-    # degrades capability, it does not take the clinic off the air.
+    # The LLM, the voice stack and telephony are deliberately excluded: losing
+    # them degrades capability, it does not take the clinic off the air.
+    #
+    # Telephony in particular must not gate this endpoint, because the dialplan
+    # calls it to decide whether to route a caller to the AI at all. Reporting
+    # "down" because the PBX is unreachable would be circular, and reporting
+    # 503 for a text deployment with no PBX would send every caller to
+    # reception forever.
     required = [c for c in components if c.name in ("database", "session_store")]
     if any(c.status == "down" for c in required):
         status_value = "down"

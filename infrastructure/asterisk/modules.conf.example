@@ -1,0 +1,32 @@
+;
+; Module loading. Copy to modules.conf.
+;
+; The AudioSocket application AND channel driver are both required: the
+; application form is used by a dialplan-only setup, and the channel driver is
+; what ARI originates into a bridge. res_audiosocket underpins both.
+;
+[modules]
+autoload=yes
+
+; --- Required by the clinic AI ---------------------------------------------
+preload => res_audiosocket.so
+load => app_audiosocket.so
+load => chan_audiosocket.so
+load => res_ari.so
+load => res_ari_channels.so
+load => res_ari_bridges.so
+load => res_ari_events.so
+load => res_stasis.so
+load => app_stasis.so
+load => chan_pjsip.so
+load => res_pjsip.so
+
+; --- Deliberately NOT loaded ------------------------------------------------
+; Call recording. The clinic retains no audio (docs/privacy/data-inventory.md).
+; Enabling either of these is a privacy decision requiring, in most Australian
+; jurisdictions, caller notification.
+noload => app_mixmonitor.so
+noload => res_monitor.so
+
+; Unused legacy channel driver. Loading it doubles the SIP attack surface.
+noload => chan_sip.so
