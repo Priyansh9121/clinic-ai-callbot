@@ -105,6 +105,15 @@ channel, and a UUID to correlate them. That sequence is in
 6. The socket is matched to that call by UUID; CallSession runs VoiceSession
 ```
 
+**The media UUID travels in the Stasis arguments** (`appArgs=media,<uuid>`),
+not only in the endpoint string. Correlating instead on the channel id returned
+by `POST /channels` is a race: that HTTP response and the ARI WebSocket are
+independent connections, and Asterisk can deliver the channel's `StasisStart`
+*first*. The correlation table would still be empty, the media channel would
+never join the bridge, and the call would connect to silence — intermittently.
+Carrying the UUID in the event makes the ordering irrelevant.
+`tests/telephony/test_ari_call_setup.py` drives both orderings.
+
 Step 5 is the security-relevant one. Without UUID correlation, a second
 concurrent call could attach to the first call's conversation — the crossover
 failure in the threat model. The media server refuses any connection it cannot
@@ -223,6 +232,12 @@ Four independent barriers stop caller speech becoming a dial string:
 clinic system advises the caller to ring 000 themselves, in wording owned by the
 SafetyEngine. Automatic emergency dialling is out of scope and would need legal
 review before it could be considered.
+
+A successful transfer takes the channel out of Stasis, so Asterisk emits
+`StasisEnd` immediately — which is indistinguishable from a caller hanging up
+unless the call is marked finished *before* teardown is awaited. It is: the
+caller did not hang up, they were handed to a human, and counting it as a
+disconnect would misreport every transfer.
 
 **Transfer failure** returns the caller to us with an approved apology from
 `app/conversation/responses.py`, rather than dropping them. If reception does

@@ -15,18 +15,23 @@ softphone (ext 200) ──SIP──► Asterisk ──ARI──► clinic AI (co
 
 The implementation was written and tested without it, deliberately.
 
-`brew` no longer carries an `asterisk` formula, macOS is not a supported
-Asterisk platform, and the machine this was built on had **6 GB of free disk on
-a 97%-full volume and 8 GB of RAM already hosting Ollama, Whisper, PostgreSQL
-and Redis**. Installing Colima + Docker + an Asterisk image would have left
-roughly 2 GB free — destabilising a working development environment to run a
-component that belongs on its own host anyway.
+`brew` no longer carries an `asterisk` formula and macOS is not a supported
+Asterisk platform, so it belongs in a Linux VM or on its own host.
+
+**Re-checked when closing the milestone, and the answer did not change.** There
+*is* a suitable home — an existing UTM Ubuntu 22.04 VM (4 GB RAM, 26 GB) — but
+at the time of checking the host had **7058 MB of its 8192 MB swap already in
+use and 5.9 GB free on a 98%-full disk**, with Ollama, Whisper, PostgreSQL and
+Redis resident. Starting a 4 GB VM there would force macOS to grow swap on a
+nearly-full volume, putting the development PostgreSQL data in `.devdata/` at
+risk. That is exactly the destabilisation this section exists to avoid, so the
+VM was left stopped and the live acceptance was not attempted here.
 
 So: **the media path, call lifecycle, transfer logic, isolation and security
-properties are covered by 72 automated tests that need no PBX**, and the media
-tests run over real loopback TCP sockets speaking the real AudioSocket wire
-protocol. What has *not* been executed is Asterisk itself — the ARI call setup
-sequence in `app/telephony/service.py` and everything below it.
+properties are covered by automated tests that need no PBX**, the media tests
+run over real loopback TCP sockets speaking the real AudioSocket wire protocol,
+and the ARI event orderings are driven through a control-plane double. What has
+*not* been executed is Asterisk itself.
 
 The application is host-independent: it connects to ARI over HTTP and accepts
 AudioSocket over TCP, so Asterisk can live in a VM, a container, or on another
@@ -72,6 +77,12 @@ Copy each `*.conf.example` to `*.conf` and substitute the `${...}` placeholders.
 cd infrastructure/asterisk
 for f in *.conf.example; do cp "$f" "${f%.example}"; done
 ```
+
+The populated `*.conf` files are **gitignored** — they hold real SIP and ARI
+passwords, and only the `*.conf.example` templates are tracked. A test
+(`test_populated_asterisk_configs_cannot_be_committed`) pins that, because the
+copy step above is otherwise one `git add -A` away from committing live PBX
+credentials.
 
 Generate real secrets — do not invent them:
 

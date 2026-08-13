@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import pathlib
 
 import pytest
 from sqlalchemy import func, select
@@ -358,6 +359,36 @@ async def test_a_failed_transfer_tells_the_caller_instead_of_dropping_them(
     spoken = factory.made["tts"].spoken  # type: ignore[attr-defined]
     assert TRANSFER_UNAVAILABLE in spoken
     assert session.stats.transferred is False
+
+
+async def test_a_transfer_is_not_recorded_as_a_caller_hangup(engine, destinations) -> None:
+    """A successful transfer takes the channel out of Stasis immediately.
+
+    Asterisk emits StasisEnd for that, which looks exactly like a caller
+    hanging up. It is not — the caller was handed to a human — and counting it
+    as a disconnect would misreport every transfer in the metrics.
+    """
+    from app.core.metrics import metrics
+
+    metrics.reset()
+    pbx = FakeAsterisk()
+    await pbx.start()
+    try:
+        session, controller = await run_call(
+            pbx, engine, destinations, stt_text="I want to speak to a person"
+        )
+        # The PBX reports the channel leaving Stasis right after the transfer.
+        controller.caller_hangs_up()
+        await asyncio.sleep(0.05)
+    finally:
+        await pbx.stop()
+
+    assert session.stats.transferred is True
+    counters = metrics.snapshot().get("counters", {})
+    disconnects = {k: v for k, v in counters.items() if "disconnects" in k}
+    assert not any("CALLER" in key for key in disconnects), (
+        f"a transfer was counted as a caller disconnect: {disconnects}"
+    )
 
 
 def test_only_approved_destinations_can_be_resolved(destinations) -> None:
@@ -710,6 +741,41 @@ async def test_call_metrics_carry_no_caller_identity(engine, destinations) -> No
     assert "0491570156" not in snapshot
     assert "+61491570156" not in snapshot
     assert "telephony.calls_started" in snapshot
+
+
+def test_populated_asterisk_configs_cannot_be_committed() -> None:
+    """The local-SIP setup writes real SIP and ARI passwords to *.conf.
+
+    docs/development/local-sip.md instructs copying each template to a
+    populated runtime config and substituting generated secrets. If those files
+    are not ignored, the next `git add -A` stages live PBX credentials. The
+    templates themselves must stay tracked.
+    """
+    import shutil
+    import subprocess
+
+    git = shutil.which("git")
+    if git is None:  # pragma: no cover - git is present in every dev environment
+        pytest.skip("git is not available")
+    root = pathlib.Path(__file__).resolve().parents[3]
+    runtime = ["pjsip.conf", "extensions.conf", "ari.conf", "http.conf", "rtp.conf"]
+    templates = ["pjsip.conf.example", "ari.conf.example"]
+
+    def ignored(name: str) -> bool:
+        return (
+            subprocess.run(  # noqa: S603
+                [git, "check-ignore", "-q", f"infrastructure/asterisk/{name}"],
+                cwd=root,
+                capture_output=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    for name in runtime:
+        assert ignored(name), f"{name} would be committed with real credentials"
+    for name in templates:
+        assert not ignored(name), f"{name} is a template and must stay tracked"
 
 
 def test_the_redaction_processor_drops_caller_identifiers() -> None:

@@ -218,11 +218,16 @@ class CallSession:
         result = await self._controller.transfer(target)
         if result.succeeded:
             self._stats.transferred = True
+            # Mark the call finished *before* awaiting anything. A successful
+            # transfer takes the channel out of Stasis, so Asterisk emits
+            # StasisEnd immediately — and if that lands while we are still
+            # stopping the voice session, it would be recorded as a caller
+            # hangup. The caller did not hang up; they were handed to a human.
+            self._ended.set()
             # The channel now belongs to the dialplan. Stop our voice session
             # so we are not still listening to a caller talking to a human.
             if self._voice is not None:
                 await self._voice.stop()
-            self._ended.set()
             return result
 
         # Transfer failed. The caller is still with us and must be told

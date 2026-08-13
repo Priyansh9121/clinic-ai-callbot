@@ -37,6 +37,13 @@ models/
 *.opus
 recordings/
 
+# --- Asterisk runtime configuration ----------------------------------------
+# docs/development/local-sip.md has you copy each *.conf.example to *.conf and
+# substitute generated SIP and ARI passwords. Those populated files hold real
+# credentials and must never be committed; only the templates are tracked.
+# (`*.conf` does not match `*.conf.example`, so the templates stay visible.)
+infrastructure/asterisk/*.conf
+
 # --- Editors / OS ----------------------------------------------------------
 .DS_Store
 .idea/

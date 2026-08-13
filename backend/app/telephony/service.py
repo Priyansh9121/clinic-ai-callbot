@@ -106,10 +106,6 @@ class TelephonyService:
         # Keyed by media UUID: the only thing linking a socket to a call.
         self._pending: dict[str, _PendingCall] = {}
         self._controllers: dict[str, AsteriskCallController] = {}
-        #: Originated media channel id -> media UUID, so the media channel's
-        #: own StasisStart can be joined to the right bridge. Instance state:
-        #: as a class attribute this would leak calls between services.
-        self._media_channels: dict[str, str] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -156,8 +152,11 @@ class TelephonyService:
         args = event.get("args") or []
 
         # The media channel we originated re-enters Stasis; it is not a caller.
-        if "media" in args:
-            await self._join_media_channel(channel_id)
+        # Its media UUID travels in the Stasis arguments, so this works whether
+        # the event arrives before or after the originate response.
+        if args and args[0] == "media":
+            media_uuid = str(args[1]) if len(args) > 1 else ""
+            await self._join_media_channel(channel_id, media_uuid)
             return
         if not channel_id:
             return
@@ -207,10 +206,18 @@ class TelephonyService:
             await controller.answer()
             await self._ari.create_bridge(bridge_id)
             await self._ari.add_to_bridge(bridge_id, channel_id)
-            media_channel_id = await self._ari.originate_media_channel(
-                host=self._media_host, port=self.media_port, media_uuid=media_uuid
+            # The UUID goes in appArgs, not just the endpoint string, so the
+            # channel's own StasisStart identifies which call it belongs to.
+            # Correlating on the id returned here instead would be a race: the
+            # WebSocket event and this HTTP response are independent, and
+            # Asterisk can deliver the event first — leaving the media channel
+            # out of the bridge and the caller listening to silence.
+            await self._ari.originate_media_channel(
+                host=self._media_host,
+                port=self.media_port,
+                media_uuid=media_uuid,
+                app_args=f"media,{media_uuid}",
             )
-            self._media_channels[media_channel_id] = media_uuid
         except AriError as exc:
             metrics.increment(M.TELEPHONY_CALLS_FAILED, labels={"stage": "setup"})
             logger.error("telephony.setup_failed", call_id=call_id, error=str(exc))
@@ -222,12 +229,12 @@ class TelephonyService:
 
         self._spawn(self._await_media(pending))
 
-    async def _join_media_channel(self, channel_id: str) -> None:
-        media_uuid = self._media_channels.pop(channel_id, None)
-        if media_uuid is None:
-            return
+    async def _join_media_channel(self, channel_id: str, media_uuid: str) -> None:
+        """Put the originated media channel into its call's bridge."""
         pending = self._pending.get(media_uuid)
         if pending is None:
+            # A stale or duplicated event for a call that has already finished.
+            logger.debug("telephony.media_channel_unmatched")
             return
         with contextlib.suppress(AriError):
             await self._ari.add_to_bridge(pending.bridge_id, channel_id)
