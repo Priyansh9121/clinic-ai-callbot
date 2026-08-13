@@ -48,11 +48,15 @@ uv run pytest --cov=app --cov-report=term-missing
 
 | Suite | What it covers |
 |---|---|
-| `tests/unit` | dates, intent baseline, redaction, config, metrics, session store |
-| `tests/integration` | booking transactions, concurrency, HTTP API |
-| `tests/conversation` | full conversations through the real engine |
+| `tests/unit` | dates, intent baseline, redaction, config, metrics, session store, LLM provider/analyser/resolution |
+| `tests/integration` | booking transactions, concurrency, HTTP API, LLM health |
+| `tests/conversation` | full conversations through the real engine, with and without the LLM |
 | `tests/safety` | emergency detection, escalation, false positives |
-| `tests/security` | prompt injection, authorisation, input validation |
+| `tests/security` | prompt injection (with and without the LLM), authorisation, input validation |
+| `tests/llm_live` | **opt-in.** Needs a real Ollama; run with `-m llm_live` |
+
+`uv run pytest` deselects `llm_live` automatically, so the suite passes on a
+machine with no model installed.
 
 Integration tests create and drop the schema per test against
 `clinic_callbot_test`. Override with `TEST_DATABASE_URL`.
@@ -61,6 +65,8 @@ Integration tests create and drop the schema per test against
 
 | Task | Where |
 |---|---|
+| A new LLM provider | a module in `app/llm/`, one branch in `llm/factory.py`. Nothing else should change |
+| A new entity hint | `EntityHints` in `llm/provider.py`, a resolver in `nlu/resolution.py`, the prompt in `llm/prompt.py` |
 | A new intent | `states.py`, a pattern in `nlu/baseline.py`, a handler in `handlers/`, dispatch in `engine.py` |
 | A new conversation state | `states.py`, then the flow that owns it |
 | A new clinic FAQ | `clinic/knowledge_data.py` — approved entries only |
@@ -104,3 +110,18 @@ the call that might fail.
 Routing must not pre-set a flow's internal state; it sets `IDENTIFY_INTENT` and
 lets the flow decide. Setting the state directly makes the flow believe it has
 already asked, and the caller gets a spurious "Sorry, I didn't catch that".
+
+**The LLM appears to be doing nothing**
+Check `LLM_MODE` (`baseline` ignores the model entirely) and `LLM_MODEL` (empty
+means not configured, and the mode silently degrades to `baseline` — the
+factory logs `llm.mode_downgraded`). Then check `GET /health`: `down` means the
+runtime is unreachable or the model is not pulled. Hybrid routing also skips
+the model whenever the deterministic answer is already confident, which is most
+short utterances; set `LLM_HYBRID_ROUTING=false` to force every turn through it.
+
+**A benchmark result looks too good**
+Make sure the circuit breaker is disabled for the run. A model emitting a few
+malformed responses will otherwise open the breaker, and the rest of the corpus
+gets answered by the *baseline* — which reads as high accuracy for the model.
+`scripts/benchmark_llm.py` sets `failure_threshold` to effectively infinity for
+exactly this reason.

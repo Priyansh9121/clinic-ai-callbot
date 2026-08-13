@@ -6,9 +6,11 @@ callers to a human when it should, and redirects medical emergencies to Triple
 Zero — without letting a language model control anything clinical or
 transactional.
 
-> **Status: Milestone 1 complete.** The conversation engine, appointment engine,
-> safety engine and APIs work end to end over text. There is no LLM, no speech
-> and no telephony yet — see [Implementation status](#implementation-status).
+> **Status: Milestones 1 and 2 complete.** The conversation engine, appointment
+> engine, safety engine and APIs work end to end over text, and a local LLM
+> improves natural-language understanding behind the same analyser interface.
+> There is no speech and no telephony yet — see
+> [Implementation status](#implementation-status).
 >
 > **All data in this repository is fictional.** "Riverside Medical Clinic", its
 > practitioners and its patients are synthetic development fixtures. This
@@ -49,6 +51,11 @@ caller utterance
 │ domain services │
 └─────────────────┘
 ```
+
+Milestone 2 added a local LLM at the **analysis** stage and nowhere else. It is
+consulted for understanding, and everything it returns is a string that must
+survive resolution against real clinic records before it can influence
+anything. See [`docs/architecture/llm.md`](docs/architecture/llm.md).
 
 The consequences that matter:
 
@@ -269,6 +276,75 @@ Data minimisation is the default, not a setting:
 
 Full inventory: [`docs/privacy/data-inventory.md`](docs/privacy/data-inventory.md).
 
+## Local LLM
+
+Off by default. With `LLM_PROVIDER=none` the system behaves exactly as it did
+at Milestone 1, and every test still passes with no model installed.
+
+```bash
+brew install ollama && ollama serve &
+ollama pull qwen2.5:1.5b-instruct
+```
+
+```bash
+# .env
+LLM_PROVIDER=ollama
+LLM_MODE=llm                       # baseline | llm | shadow
+LLM_MODEL=qwen2.5:1.5b-instruct
+```
+
+Three modes:
+
+- **`baseline`** — deterministic analyser only. The default.
+- **`llm`** — prefer the model; fall back to deterministic on timeout,
+  connection failure, malformed output, unknown intent, or low confidence.
+- **`shadow`** — deterministic result is returned to the caller; the model runs
+  alongside and only agreement metrics are recorded. Use this to decide whether
+  a model is worth trusting before switching to `llm`.
+
+Benchmark any model against the deterministic baseline on the same corpus:
+
+```bash
+uv run python scripts/benchmark_llm.py --baseline-only
+uv run python scripts/benchmark_llm.py --model qwen2.5:1.5b-instruct
+uv run python scripts/benchmark_llm.py --compare qwen2.5:1.5b-instruct llama3.2:3b-instruct-q4_K_M
+```
+
+Live-model tests are opt-in so ordinary runs need no Ollama:
+
+```bash
+cd backend && uv run pytest -m llm_live
+```
+
+### Measured results
+
+Apple M2, 8 GB, Ollama 0.32.9. 140-case corpus
+(`backend/tests/fixtures/nlu_corpus.py`), 125 of them intent-labelled. Hybrid
+routing off and circuit breaker disabled, so every case reaches the model.
+
+| Analyser | Intent accuracy | Median | p95 | Invalid responses |
+|---|---|---|---|---|
+| Deterministic baseline | 48.8% (61/125) | 0.1 ms | 0.1 ms | — |
+| **qwen2.5:1.5b-instruct** | **71.2%** (89/125, +22.4) | 1230 ms | 2291 ms | 0.0% |
+| llama3.2:3b-instruct-q4_K_M | 76.8% (96/125, +28.0) | 2089 ms | 2421 ms | 12.1% |
+| qwen2.5:3b-instruct | 59.2% (74/125, +10.4) | 1997 ms | 2225 ms | 2.1% |
+
+Entity resolution, LLM vs baseline: date 100% (+10.0), selection 100% (+16.7),
+practitioner 93.8–100%, appointment type 100%, patient type 100%, period 92.9%.
+**No entity metric is below the baseline**, by construction — model hints fill
+fields the deterministic parser left empty and never overrule one it resolved.
+
+`qwen2.5:1.5b-instruct` is the recommended default: two-thirds the latency of
+the 3B models for ~6 points less accuracy, and it never emitted malformed
+output. Note that `qwen2.5:3b` scores *worse* than `qwen2.5:1.5b` here —
+parameter count does not predict fit for this task.
+
+In production, hybrid routing skips the model on confident deterministic turns,
+so a typical booking conversation makes ~5 model calls rather than one per turn.
+
+Architecture, failure handling, privacy boundary and benchmark method:
+[`docs/architecture/llm.md`](docs/architecture/llm.md).
+
 ## Environment variables
 
 Every variable is documented in [`.env.example`](.env.example). The ones worth
@@ -285,6 +361,14 @@ knowing:
 | `RETAIN_TRANSCRIPTS` | `false` | |
 | `MAX_MISUNDERSTANDINGS` | `2` | then transfer to reception |
 | `BOOKING_LEAD_MINUTES` | `60` | minimum notice before an appointment |
+| `LLM_PROVIDER` | `none` | `none` \| `ollama` \| `llamacpp` |
+| `LLM_MODE` | `baseline` | `baseline` \| `llm` \| `shadow` |
+| `LLM_MODEL` | *(empty)* | required when a provider is set; empty degrades to baseline |
+| `LLM_TIMEOUT_SECONDS` | `3.0` | a caller is waiting; slower is worse than deterministic |
+| `LLM_MIN_CONFIDENCE` | `0.6` | below this, use the deterministic result |
+| `LLM_MAX_CONCURRENCY` | `2` | saturation falls back rather than queueing |
+| `LLM_KEEP_ALIVE` | `30m` | stops Ollama unloading the model between calls |
+| `LLM_HYBRID_ROUTING` | `true` | skip the model when the baseline is already certain |
 
 A production instance refuses to start with a development secret, `APP_DEBUG`
 on, no Redis, wildcard CORS, development API keys, or audio retention enabled.
@@ -308,7 +392,7 @@ change is an explicit operational step, not a side effect of a restart.
 | | Milestone | Status |
 |---|---|---|
 | 1 | Database, appointments, conversation engine, safety, text API, simulator, tests | **complete** |
-| 2 | Local LLM behind the provider interface, structured extraction, fallback | interface only |
+| 2 | Local LLM behind the analyser interface, strict validation, hint resolution, fallback, shadow mode, benchmark | **complete** |
 | 3 | STT, TTS, VAD, streaming audio, barge-in, latency metrics | interfaces only |
 | 4 | Asterisk, PJSIP, external media gateway, AI-failure fallback | not started |
 | 5 | OTP verification, staff dashboard, RBAC UI, load and red-team testing | partial (RBAC + audit trail exist) |
@@ -334,6 +418,21 @@ change is an explicit operational step, not a side effect of a restart.
 - **No admin dashboard yet.** `frontend/` is an empty placeholder.
 - **`ruff format` is applied but not enforced in CI** — there is no CI pipeline
   in this repository yet.
+- **LLM latency is too high for the Milestone 3 voice budget.** ~1.2 s median
+  on this hardware against a ~800 ms total budget to first audio. Hybrid
+  routing hides it on most turns, but a model-consulted turn will be audible
+  once speech is attached. Options then: a smaller model, a faster host, or
+  speaking an acknowledgement while the model runs.
+- **The model is only ~71% accurate on hard indirect phrasing**, so it
+  misreads some utterances — it read "Something's come up and my booking won't
+  work anymore" as a cancellation rather than a reschedule. The deterministic
+  confirmation step caught it and nothing was cancelled, which is the design
+  working, but the caller still had to correct it.
+- **`confidence` from small instruct models is not calibrated.** They report
+  high confidence when wrong and 0.0 when unsure. `LLM_MIN_CONFIDENCE` is a
+  safety valve, not a probability.
+- **Shadow mode makes a model call on every turn** by design, so it costs
+  latency on the server even though the caller never waits for it.
 
 ## Licence
 

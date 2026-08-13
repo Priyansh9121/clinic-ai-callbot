@@ -109,6 +109,11 @@ def configure_logging(settings: Settings) -> None:
     # uvicorn's access log duplicates our structured request log and can echo
     # query strings; keep it quiet.
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # httpx logs a line per outbound request. It carries no caller text, but it
+    # is one line per conversation turn once the LLM is enabled, and it is not
+    # routed through our redaction processor — so it stays off by default.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

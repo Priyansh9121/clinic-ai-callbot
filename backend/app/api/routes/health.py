@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import text
 
 from app.api.deps import AppSettings, DbSession, get_session_store
@@ -24,8 +24,59 @@ router = APIRouter(tags=["health"])
 VERSION = "0.1.0"
 
 
+async def _llm_component(request: Request, settings: AppSettings) -> HealthComponent:
+    """Real LLM status.
+
+    Deliberately does **not** gate the overall health status. The deterministic
+    analyser handles every turn on its own, so:
+
+        LLM down  =  degraded intelligence, not a service outage
+
+    Treating it as an outage would send callers to reception over a failure the
+    system is designed to absorb — and, once telephony lands, the dialplan
+    routes on this endpoint. Detail is limited to provider and model names.
+    """
+    if not settings.llm_configured:
+        return HealthComponent(
+            name="llm",
+            status="not_configured",
+            detail=f"provider={settings.llm_provider} mode={settings.effective_llm_mode}",
+        )
+
+    detail = (
+        f"provider={settings.llm_provider} model={settings.llm_model} "
+        f"mode={settings.effective_llm_mode}"
+    )
+    provider = getattr(request.app.state, "llm_provider", None)
+    if provider is None:
+        return HealthComponent(name="llm", status="down", detail=detail)
+
+    started = time.perf_counter()
+    try:
+        reachable = await provider.health()
+    except Exception as exc:
+        return HealthComponent(
+            name="llm", status="down", detail=f"{detail} error={type(exc).__name__}"
+        )
+
+    if getattr(provider, "circuit_open", False):
+        return HealthComponent(
+            name="llm",
+            status="degraded",
+            detail=f"{detail} circuit=open",
+            latency_ms=round((time.perf_counter() - started) * 1000, 2),
+        )
+    return HealthComponent(
+        name="llm",
+        status="ok" if reachable else "down",
+        detail=detail,
+        latency_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(
+    request: Request,
     response: Response,
     db: DbSession,
     settings: AppSettings,
@@ -59,10 +110,11 @@ async def health(
         )
     )
 
+    components.append(await _llm_component(request, settings))
+
     # Later-milestone components report their configured state so the dashboard
     # and the telephony health check show the truth rather than a stub "ok".
     for name, provider in (
-        ("llm", settings.llm_provider),
         ("stt", settings.stt_provider),
         ("tts", settings.tts_provider),
         ("vad", settings.vad_provider),

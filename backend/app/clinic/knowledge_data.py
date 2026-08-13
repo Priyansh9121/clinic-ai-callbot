@@ -24,7 +24,17 @@ DEV_KNOWLEDGE_ENTRIES: list[KnowledgeEntry] = [
     KnowledgeEntry(
         topic=KnowledgeTopic.LOCATION,
         answer="We're at 12 Riverside Drive, Richmond, close to the train station.",
-        keywords=("address", "where are you", "located", "location", "how do i get"),
+        # "whereabouts" is everyday Australian phrasing and does not contain
+        # "where are you" as a whole word, so it needs its own keyword.
+        keywords=(
+            "address",
+            "where are you",
+            "whereabouts",
+            "located",
+            "location",
+            "how do i get",
+            "how do i find",
+        ),
     ),
     KnowledgeEntry(
         topic=KnowledgeTopic.PARKING,
@@ -42,7 +52,19 @@ DEV_KNOWLEDGE_ENTRIES: list[KnowledgeEntry] = [
             "A standard consultation is 85 dollars, with a Medicare rebate of about 42 dollars. "
             "Reception can confirm the exact amount."
         ),
-        keywords=("fee", "fees", "cost", "price", "how much", "charge", "gap"),
+        keywords=(
+            "fee",
+            "fees",
+            "cost",
+            "price",
+            "how much",
+            "charge",
+            "gap",
+            "have to pay",
+            "do i pay",
+            "is it free",
+            "out of pocket",
+        ),
     ),
     KnowledgeEntry(
         topic=KnowledgeTopic.BULK_BILLING,

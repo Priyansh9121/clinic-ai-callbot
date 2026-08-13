@@ -9,15 +9,19 @@ transition, a permission or a database write.
 ```
 1. SAFETY        deterministic rules. No model, no network, no database.
                  Emergency → leave the workflow. Cannot be re-entered.
-2. ANALYSIS      intent + entities. Replaceable by an LLM (Milestone 2).
+2. ANALYSIS      intent + entities. A local LLM participates here (Milestone 2).
 3. MEMORY        entities folded into the session; changed fields recorded.
 4. ROUTING       transfer requests, intent switches, call closing.
 5. FLOW          the handler for the active intent takes one step.
 6. PERSISTENCE   session to the store, structured events to PostgreSQL.
 ```
 
-Stage 2 is the only one a language model will ever touch. Stages 1, 4 and 5 are
-code.
+Stage 2 is the only one a language model touches. Stages 1, 4 and 5 are code.
+
+Stage 2 is chosen by configuration: `BaselineAnalyser` (deterministic) or
+`LLMBackedAnalyser` (deterministic *plus* a local model). Both implement the
+`MessageAnalyser` protocol, so the engine is unchanged and cannot tell which is
+active. See [`llm.md`](llm.md).
 
 ## Why slot filling rather than a script
 

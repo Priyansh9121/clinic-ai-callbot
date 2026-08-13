@@ -191,6 +191,13 @@ _INTENT_PATTERNS: tuple[tuple[Intent, str, float], ...] = (
         # "I want reception" / "give me a person" — no verb of speaking.
         r"|\b(i want|id like|i need|give me|can i have|just get me)\s+(to\s+)?"
         r"(reception|the receptionist|a human|a person|someone|an operator)\b"
+        # A request for a person must be recognised deterministically, never
+        # left to a model: the front-desk phrasings and explicit rejections of
+        # automation below are common and must not depend on the LLM being up.
+        r"|\b(front desk|frontdesk)\b"
+        r"|\b(dont|do not|rather not|dont want to) (want to )?(talk|speak|deal) "
+        r"(to|with)? ?(a )?(robot|machine|computer|bot|automated)\b"
+        r"|\b(automated|automatic) (system|service|thing)\b"
         r"|\breal person\b|\bhuman being\b|\boperator\b",
         0.95,
     ),

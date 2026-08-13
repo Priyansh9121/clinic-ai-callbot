@@ -91,12 +91,41 @@ class Settings(BaseSettings):
     otp_ttl_seconds: int = 300
     otp_max_attempts: int = 3
 
-    # --- Later-milestone providers (declared, not yet wired) ---------------
+    # --- Local LLM (Milestone 2) -------------------------------------------
     llm_provider: Literal["none", "ollama", "llamacpp"] = "none"
+    # baseline: deterministic analyser only (Milestone 1 behaviour).
+    # llm:      prefer the model, fall back to the baseline on any failure.
+    # shadow:   baseline is authoritative; the model runs alongside for
+    #           comparison metrics only and cannot affect the caller.
+    llm_mode: Literal["baseline", "llm", "shadow"] = "baseline"
     llm_base_url: str = "http://127.0.0.1:11434"
-    llm_model: str = "qwen2.5:3b-instruct"
-    llm_timeout_seconds: float = 6.0
+    llm_model: str = ""
+    # A caller is on the phone. Anything slower than this is worse than a
+    # slightly less accurate deterministic answer, so the request is cancelled.
+    llm_timeout_seconds: float = 3.0
+    # Below this, the model's own reported confidence is not trusted and the
+    # deterministic result is used instead. Note that small instruct models are
+    # poorly calibrated and tend to report high confidence regardless; this is
+    # a safety valve, not a probability. See docs/architecture/llm.md.
     llm_min_confidence: float = 0.6
+    # Bounds simultaneous generations so concurrent calls cannot exhaust the
+    # machine. Saturation degrades to the baseline rather than queueing.
+    llm_max_concurrency: int = 2
+    # Structured classification needs very few tokens; capping output bounds
+    # both latency and the size of anything that has to be validated.
+    llm_max_output_tokens: int = 200
+    llm_temperature: float = 0.0
+    # Consecutive provider failures before the breaker opens and every turn
+    # goes straight to the baseline until the cooldown elapses.
+    llm_failure_threshold: int = 3
+    llm_recovery_seconds: float = 30.0
+    # Skip the model when the deterministic analyser is already certain
+    # ("yes", "the first one", an explicit request for a human). Pure latency
+    # win; set false to force every turn through the model when benchmarking.
+    llm_hybrid_routing: bool = True
+    # How long Ollama keeps the model resident. The default (5 minutes)
+    # lets an idle clinic line pay a cold reload on the next call.
+    llm_keep_alive: str = "30m"
 
     stt_provider: Literal["none", "faster_whisper", "whispercpp"] = "none"
     stt_model: str = "small.en"
@@ -139,6 +168,24 @@ class Settings(BaseSettings):
     @property
     def session_store_backend(self) -> Literal["redis", "memory"]:
         return "redis" if self.redis_url else "memory"
+
+    @property
+    def llm_configured(self) -> bool:
+        """A provider and a model are both named. Says nothing about reachability."""
+        return self.llm_provider != "none" and bool(self.llm_model.strip())
+
+    @property
+    def effective_llm_mode(self) -> Literal["baseline", "llm", "shadow"]:
+        """The mode that will actually run.
+
+        Requesting ``llm`` or ``shadow`` without a configured provider is a
+        configuration mistake, not a reason to refuse to answer the phone: it
+        degrades to ``baseline`` and the factory logs the discrepancy. The
+        clinic stays reachable, which is the overriding requirement.
+        """
+        if not self.llm_configured:
+            return "baseline"
+        return self.llm_mode
 
     # --- Validation --------------------------------------------------------
     @field_validator("clinic_timezone")

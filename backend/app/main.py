@@ -6,6 +6,7 @@ lives in the domain packages.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -16,12 +17,12 @@ from fastapi.responses import JSONResponse
 
 from app.api.router import api_router, health_router
 from app.clinic.knowledge_data import build_dev_knowledge
-from app.conversation.nlu.baseline import BaselineAnalyser
 from app.conversation.store import build_session_store
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.core.logging import configure_logging, get_logger
 from app.database.session import dispose_engine
+from app.llm.factory import build_llm_provider, build_message_analyser
 from app.safety.engine import SafetyEngine
 from app.security.headers import RequestContextMiddleware, SecurityHeadersMiddleware
 from app.security.ratelimit import RateLimitMiddleware
@@ -37,18 +38,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # requests; per-request services are built in app.api.deps.
     app.state.session_store = build_session_store(settings.redis_url, settings.session_ttl_seconds)
     app.state.safety_engine = SafetyEngine()
-    app.state.analyser = BaselineAnalyser()
     app.state.knowledge = build_dev_knowledge()
+
+    # The analyser is chosen by configuration. Nothing downstream knows whether
+    # a model is involved — routes and the engine only ever see a
+    # MessageAnalyser. Construction touches no network, so an unreachable model
+    # cannot stop the backend from starting; it is discovered on the first turn
+    # and handled by the deterministic fallback.
+    app.state.llm_provider = build_llm_provider(settings)
+    app.state.analyser = build_message_analyser(settings, provider=app.state.llm_provider)
 
     logger.info(
         "app.startup",
         environment=settings.app_env,
         session_store=settings.session_store_backend,
         llm_provider=settings.llm_provider,
+        llm_mode=settings.effective_llm_mode,
     )
+
+    # Warm the model so the first caller does not pay for loading weights.
+    # Backgrounded and never awaited at startup: a slow or dead runtime must
+    # not delay the clinic becoming reachable.
+    if app.state.llm_provider is not None and settings.effective_llm_mode != "baseline":
+        warmup = getattr(app.state.llm_provider, "warmup", None)
+        if warmup is not None:
+            app.state.llm_warmup_task = asyncio.create_task(warmup())
+
     try:
         yield
     finally:
+        task = getattr(app.state, "llm_warmup_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        provider = getattr(app.state, "llm_provider", None)
+        if provider is not None and hasattr(provider, "aclose"):
+            await provider.aclose()
         await app.state.session_store.close()
         await dispose_engine()
         logger.info("app.shutdown")

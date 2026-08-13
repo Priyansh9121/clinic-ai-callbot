@@ -1,11 +1,11 @@
 """Local LLM provider interface.
 
-STATUS: interface only. **No provider is implemented yet** — that is Milestone
-2. ``LLM_PROVIDER`` defaults to ``none`` and the system runs entirely on the
-deterministic baseline analyser.
+Implemented by ``app.llm.ollama.OllamaLLMProvider``. ``LLM_PROVIDER`` defaults
+to ``none``, in which case the system runs entirely on the deterministic
+baseline analyser and behaves exactly as it did in Milestone 1.
 
-The interface is defined now because it constrains what a model is ever allowed
-to do, and that constraint is what the current architecture is built around:
+The interface constrains what a model is ever allowed to do, and that
+constraint is what the architecture is built around:
 
 * A provider returns **structured analysis only** — an intent, a confidence and
   entity *hints*. It returns no SQL, no tool name, no patient id, and no text
@@ -33,9 +33,16 @@ class EntityHints(BaseModel):
 
     Every field is free text on purpose: these are hints to be resolved and
     validated by application code, never values to act on directly.
+
+    ``extra="forbid"`` matches the outer schema. It was ``ignore`` while this
+    was an unused interface, which would have silently dropped an invented
+    ``practitioner_id`` rather than rejecting the whole response. Silent
+    dropping is the more dangerous default: it makes a model that has started
+    emitting identifiers look like it is behaving. Now the response is refused
+    and the turn falls back to the deterministic analyser.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     practitioner: str | None = Field(default=None, max_length=80)
     preferred_date_text: str | None = Field(default=None, max_length=60)

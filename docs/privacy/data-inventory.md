@@ -19,6 +19,32 @@
 | Audit events | `audit_events` | Accountability for sensitive operations | ≥ 7 years (clinic policy) | Ids and reason codes only |
 | Conversation session | Redis | Hold state during the call | `SESSION_TTL_SECONDS` (default 30 min) | Transient; never the system of record |
 
+## What the local LLM receives (Milestone 2)
+
+The model runs locally — nothing leaves the machine — but data minimisation
+applies regardless, because a prompt is still a copy of the data.
+
+| Sent to the model | Why |
+|---|---|
+| The current utterance (truncated to 400 chars) | the thing being classified |
+| The conversation state name | "the second one" means different things in different states |
+| Practitioner display names | so "Patel" is recognised as a name |
+| Appointment type names | so "long appointment" is recognised as a type |
+
+**Never sent:** patient names, dates of birth, mobile numbers, email addresses,
+patient or appointment identifiers, verification answers, previous turns, any
+session history, or audit records. Patient matching is entirely deterministic
+and happens in application code after analysis.
+
+`test_only_permitted_context_reaches_the_provider` asserts the provider call
+carries exactly those four arguments and nothing else.
+
+Nothing about the model interaction is retained: no prompt, no raw response, no
+per-turn record. Shadow mode keeps two enum values and a confidence bucket —
+enough to answer "is the model better?" without retaining anything about the
+caller. Patient conversations are never used to train or fine-tune a model;
+models are local and static.
+
 ## What is deliberately **not** collected
 
 - **Call audio.** Nothing stores or references audio. `RETAIN_AUDIO` exists so

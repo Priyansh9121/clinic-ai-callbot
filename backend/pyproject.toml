@@ -58,8 +58,12 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::DeprecationWarning:app.*"]
+# Live-model checks are opt-in: `uv run pytest` must pass with no Ollama
+# installed. Run them with `uv run pytest -m llm_live`.
+addopts = "-m 'not llm_live'"
 markers = [
     "integration: requires a live PostgreSQL database",
+    "llm_live: requires a local Ollama runtime with the configured model pulled",
 ]
 
 [tool.mypy]

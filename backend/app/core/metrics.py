@@ -136,8 +136,25 @@ class M:
     CALL_DURATION = "call.duration_ms"
     CALL_TURNS = "call.turns"
 
+    # --- Local LLM (Milestone 2) -------------------------------------------
+    # Label values are closed sets only (provider, model, state, reason code).
+    # Never caller text, names or identifiers.
+    LLM_LATENCY = "llm.analyse_latency"
+    LLM_REQUESTS = "llm.requests_total"
+    LLM_SUCCESS = "llm.success"
+    LLM_FAILURE = "llm.failure"
+    LLM_TIMEOUT = "llm.timeout"
+    LLM_INVALID_RESPONSE = "llm.invalid_response"
+    LLM_LOW_CONFIDENCE = "llm.low_confidence"
+    LLM_FALLBACK = "llm.fallback"
+    LLM_SKIPPED = "llm.skipped"
+    LLM_CIRCUIT_OPEN = "llm.circuit_open"
+    LLM_SATURATED = "llm.saturated"
+    LLM_SHADOW_AGREEMENT = "llm.shadow_agreement"
+    LLM_SHADOW_DISAGREEMENT = "llm.shadow_disagreement"
+    ANALYSER_LATENCY = "llm.analyser_total_latency"
+
     # Reserved for later milestones so names are agreed up-front.
     STT_LATENCY = "speech.stt_latency"
-    LLM_LATENCY = "llm.analyse_latency"
     TTS_FIRST_AUDIO = "speech.tts_first_audio_latency"
     BARGE_IN = "speech.barge_in"
