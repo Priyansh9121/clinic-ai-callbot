@@ -49,7 +49,10 @@ models are local and static.
 
 - **Call audio.** Nothing stores or references audio. `RETAIN_AUDIO` exists so
   the decision is explicit and refusable; a production instance will not start
-  with it enabled.
+  with it enabled. Milestone 3 added a live microphone and still writes no
+  audio: PCM exists in memory for one utterance and is discarded. There is no
+  recording path, no temporary speech file, no STT debug dump and no `.wav`
+  capture anywhere in the voice pipeline.
 - **Transcripts.** Off by default. With `RETAIN_TRANSCRIPTS=true`, turn text is
   written to `call_events` truncated to 500 characters — enable only with a
   documented justification and a retention decision.
@@ -58,6 +61,35 @@ models are local and static.
 - **Anything used for model training.** Patient conversations are never used to
   train or fine-tune a model. Models are local and static.
 
+## What the voice pipeline receives (Milestone 3)
+
+| Stage | Sees | Retains |
+|---|---|---|
+| Microphone / VAD | raw PCM frames | nothing — a bounded ring, overwritten continuously |
+| STT | one utterance of PCM, plus a clinic-vocabulary decoder prompt | nothing |
+| ConversationEngine | the transcript, as ordinary text | per Milestone 1 rules |
+| TTS | the reply text | fixed catalogue phrases only (see below) |
+| Speaker | synthesised PCM | nothing |
+
+Three constraints are worth stating explicitly, because each is a place audio
+could have quietly become a data store:
+
+- **The STT vocabulary bias holds clinic terms only** — practitioner display
+  names, appointment-type names, the clinic name. Patient names are never put in
+  the decoder prompt: it is sent on *every* utterance, so a patient name in it
+  would leak across callers as well as being retained.
+- **The TTS cache is an allowlist, not a general cache.** It admits only phrases
+  drawn from the response catalogue, and excludes any template containing `{`,
+  because a template becomes patient-specific the moment it is filled. "Anything
+  else?" is cached; "Booked. Dr Sarah Patel, tomorrow at 12 pm." is not.
+- **Voice logs carry no content.** Timings, provider names, frame counts and
+  character *counts* only — never PCM, base64 audio, transcripts, caller speech
+  or patient-specific reply text.
+
+`scripts/voice_chat.py --show-transcript` prints what was heard to the
+developer's terminal for work against the synthetic clinic. It writes nothing to
+disk and nothing to the logs.
+
 ## Where it lives
 
 | Store | Contents | Exposure |
@@ -65,6 +97,7 @@ models are local and static.
 | PostgreSQL | everything above except sessions | `127.0.0.1` only in the shipped configuration |
 | Redis | conversation sessions, TTL-bounded | `127.0.0.1` only; no persistence (`--save "" --appendonly no`) |
 | Logs | redacted structured events | stderr |
+| Audio | never persisted — in-memory PCM, one utterance at a time | process memory only |
 | Metrics | counters and latency only | `/health/metrics` |
 
 ## Who can access it

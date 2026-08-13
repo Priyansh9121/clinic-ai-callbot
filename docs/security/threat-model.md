@@ -1,8 +1,8 @@
 # Threat model
 
-Scope: the text conversation API, appointment engine, clinic directory and the
-local LLM analyser. Telephony and speech are not yet present and are noted where
-they will change the picture.
+Scope: the text conversation API, appointment engine, clinic directory, the
+local LLM analyser and the local voice pipeline. Telephony is not yet present
+and is noted where it will change the picture.
 
 ## T1 — Prompt injection through caller speech
 
@@ -17,6 +17,14 @@ utterance to a query, so instruction-shaped text has nothing to instruct.
 
 **Verified by** `tests/security/test_prompt_injection.py` — 18 payloads asserted
 not to leak internals, not to grant identity, and not to change any row count.
+
+**Spoken injection (Milestone 3).** A transcript is text, and it enters through
+the same `handle_message` seam as a typed message, so it inherits every
+structural limit above — there is no audio-specific path to the database.
+Speaking an injection adds nothing to the attacker's reach; it only adds
+transcription error. `tests/conversation/test_voice_session.py` asserts this
+directly, replaying injection payloads *as speech* through the real orchestrator
+and checking the appointment and patient row counts are unchanged.
 
 ## T1a — Injection *through* the local LLM (Milestone 2)
 
@@ -168,6 +176,98 @@ failure, or on timeout, the call goes straight to reception; if reception is
 unavailable, to the approved voicemail. The AI stack runs as a separate process
 from Asterisk so that an AI crash cannot take telephony down.
 `GET /health` already reports per-component status to support exactly this.
+
+## T10 — Malformed, hostile or oversized audio (Milestone 3)
+
+**Attack.** A caller — or a compromised telephony leg in Milestone 4 — holds the
+line open indefinitely, sends a continuous tone, or feeds audio crafted to make
+a native decoder misbehave.
+
+**Mitigations.**
+
+- **Bounded utterances at two independent layers.** The endpointer stops a turn
+  at `max_utterance_ms` (20 s), and `FasterWhisperSTT` independently truncates
+  anything over `MAX_UTTERANCE_SECONDS` (30 s) rather than refusing it — the
+  caller said *something*, and the first 30 s is far likelier to carry the
+  request than the tail. Neither layer trusts the other to have run.
+- **Bounded queues.** The microphone transport holds at most
+  `DEFAULT_INPUT_QUEUE_FRAMES` (100 frames, 2 s) and drops the *oldest* frame on
+  overflow, recording `audio.input_overrun`. A producer faster than the consumer
+  costs stale audio, never unbounded memory.
+- **Bounded synthesis.** `PiperTTS` refuses text over `MAX_TEXT_CHARS` (1 000),
+  so a long LLM reply cannot become a minutes-long synthesis job.
+- **Bounded concurrency.** Both speech providers hold semaphores, so N
+  concurrent callers cannot spawn N model invocations on an 8 GB machine.
+- **One decode path.** Every conversion runs through `app/speech/audio.py`
+  (numpy + soxr) on raw PCM. No container parsing, no codec negotiation, no
+  `wave` module on caller audio — the classic decoder attack surface is simply
+  not reachable from the caller. `wav_bytes`/`read_wav` exist for developer
+  tooling and are never applied to live input.
+- **Native code is still native code.** CTranslate2, ONNX Runtime and Piper are
+  C++ dependencies processing caller-influenced input. They are fed
+  length-checked PCM float arrays, never caller-supplied files or metadata.
+
+**Residual risk.** A memory-safety bug in a native inference library remains
+reachable through audio content. Mitigation is operational: run the voice
+process unprivileged and isolated from telephony, and keep the libraries
+patched.
+
+## T11 — Misrecognition of safety-critical speech (Milestone 3)
+
+**Attack.** Not an attack — a failure mode, and the most serious one in this
+milestone. STT mishears a caller describing an emergency, so the deterministic
+SafetyEngine never sees the words it keys on.
+
+**Why this is not solved by "better STT".** The SafetyEngine is exact and
+verified, but it can only assess the text it is given. Every recogniser has a
+word error rate above zero, and phone-quality audio, accents and background
+noise all raise it. **STT does not solve misrecognition, and this milestone does
+not claim it does.**
+
+**Mitigations.**
+
+- **Model chosen on safety, not speed.** `scripts/benchmark_stt.py` scores a
+  safety-critical phrase set on keyword survival, not only WER. `tiny.en` was
+  rejected on measurement: it heard *"my face has gone **down** on one side"*
+  for "gone **numb**", losing a stroke symptom, and read a date of birth as
+  1980 where the caller said 1982. `base.en` kept 10/10 safety keywords.
+- **Regression guards.** `tests/voice_live/test_live_speech.py` replays the
+  emergency phrasings through the real recogniser and asserts each keyword
+  survives, and that a transcribed "chest pain" still produces an emergency
+  verdict.
+- **Confirmation before action is unchanged.** Voice removes no confirmation
+  step. Bookings, reschedules and cancellations are still read back and
+  confirmed before anything is committed, so a misheard detail has a second
+  chance to be caught by the caller.
+- **The bot never diagnoses.** Clinical questions escalate to a human, so a
+  misheard symptom cannot produce advice; the worst case is an unnecessary
+  escalation.
+
+**Residual risk — accepted and documented.** A caller whose emergency wording is
+misrecognised may be handled as a routine booking. The benchmark numbers are
+measured on *synthetic* speech (no recordings are kept — see
+`docs/privacy/data-inventory.md`), which is cleaner than a real phone line, so
+field accuracy will be **worse** than reported. Before any real deployment this
+needs a clinic-recorded evaluation set under consent, plus the Milestone 4
+fallback: if the AI is uncertain or fails, the call reaches a human.
+
+## T12 — Audio as a new data-retention surface (Milestone 3)
+
+**Attack.** Voice quietly reintroduces recording — a debug `.wav`, a temporary
+file for a decoder, a cached utterance, a transcript in a log line.
+
+**Mitigations.** Audio is in-memory PCM for the duration of one utterance and is
+then discarded. No recording path exists, no temporary audio file is written,
+and no STT debug dump is produced. Logs carry timings, provider names and
+character *counts*; the `faster_whisper` logger is turned down to `WARNING` at
+model load precisely because it writes per-utterance lines through the stdlib
+root logger, outside our redaction-aware handlers. The TTS cache is an
+**allowlist** of fixed catalogue phrases and rejects any filled template, so it
+cannot accumulate patient-specific speech. `--show-transcript` prints to the
+developer's terminal and writes nothing.
+
+**Verified by** the cache allowlist tests, and by
+`test_metrics_contain_no_content`.
 
 ## Out of scope here
 

@@ -14,6 +14,16 @@ description = "Self-hosted AI clinic receptionist (workspace root)"
 requires-python = ">=3.12"
 dependencies = ["clinic-ai-callbot-backend"]
 
+[project.optional-dependencies]
+voice = [
+    "faster-whisper>=1.2.1",
+    "numpy>=2.5.2",
+    "onnxruntime>=1.28.0",
+    "piper-tts>=1.6.0",
+    "sounddevice>=0.5.5",
+    "soxr>=1.1.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",

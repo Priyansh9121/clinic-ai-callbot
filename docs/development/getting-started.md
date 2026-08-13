@@ -40,7 +40,7 @@ fail at start-up even though `initdb -L` succeeds. Override with `DEV_PG_BIN`.
 
 ```bash
 cd backend
-uv run pytest                        # all 309
+uv run pytest                        # everything except the live-engine suites
 uv run pytest -m "not integration"   # no database needed
 uv run pytest tests/conversation -v
 uv run pytest --cov=app --cov-report=term-missing
@@ -54,9 +54,13 @@ uv run pytest --cov=app --cov-report=term-missing
 | `tests/safety` | emergency detection, escalation, false positives |
 | `tests/security` | prompt injection (with and without the LLM), authorisation, input validation |
 | `tests/llm_live` | **opt-in.** Needs a real Ollama; run with `-m llm_live` |
+| `tests/voice_live` | **opt-in.** Needs the Whisper weights and a Piper voice; run with `-m voice_live` |
 
-`uv run pytest` deselects `llm_live` automatically, so the suite passes on a
-machine with no model installed.
+`uv run pytest` deselects `llm_live` and `voice_live` automatically, so the
+suite passes on a machine with no model, no speech weights and no sound card.
+Voice orchestration itself is covered without any of that:
+`tests/conversation/test_voice_session.py` drives the real `VoiceSession` with
+fake audio devices and fake engines.
 
 Integration tests create and drop the schema per test against
 `clinic_callbot_test`. Override with `TEST_DATABASE_URL`.
@@ -74,6 +78,9 @@ Integration tests create and drop the schema per test against
 | A new spoken phrase | `conversation/responses.py`, never inline |
 | A schema change | a model, then `alembic revision --autogenerate` |
 | A new endpoint | a route in `api/routes/`, schemas in `schemas/`, logic in a service |
+| A new STT/TTS/VAD engine | a module under `app/speech/`, one branch in `speech/factory.py`. The provider Protocols do not change |
+| A new audio transport (telephony) | implement `AudioInput`/`AudioOutput` in `voice/transport.py` and pass them to `build_voice_session()`. `VoiceSession` must not learn about it |
+| An audio format conversion | `speech/audio.py` and nowhere else |
 
 ## Conventions worth knowing
 
@@ -88,6 +95,13 @@ Integration tests create and drop the schema per test against
 - **Naive datetimes are rejected**, not guessed. `core/timeutils.py` is the only
   place timezone arithmetic happens.
 - **Services own transactions.** Routes never commit.
+- **Voice is an adapter, not an engine.** `app/voice/` calls the same
+  `handle_message(session_id, text)` seam as the CLI and the API. Do not move a
+  clinic rule into it, and do not teach `ConversationEngine` about audio.
+- **Audio never touches disk.** No recordings, no temporary speech files, no
+  debug dumps. If you need to hear what happened, play it — do not save it.
+- **Logs carry timings, not content.** Never log PCM, base64 audio, a
+  transcript, or a patient-specific reply.
 
 ## Common problems
 
@@ -118,6 +132,25 @@ factory logs `llm.mode_downgraded`). Then check `GET /health`: `down` means the
 runtime is unreachable or the model is not pulled. Hybrid routing also skips
 the model whenever the deterministic answer is already confident, which is most
 short utterances; set `LLM_HYBRID_ROUTING=false` to force every turn through it.
+
+**The agent interrupts itself**
+You are on open speakers. The microphone is deliberately never gated on
+playback — that is what makes barge-in possible — so the VAD hears the agent.
+Use headphones, or raise `VOICE_BARGE_IN_FRAMES`.
+
+**Nothing is transcribed, or turns never end**
+Run `scripts/voice_chat.py --push-to-talk`, which bypasses VAD and endpointing.
+If push-to-talk transcribes correctly and normal mode does not, the problem is
+VAD or endpointing; if it transcribes badly too, the problem is STT or the
+microphone level. `--show-state` prints the state machine live.
+
+Note that Silero v5 needs a 64-sample context prepended to each 512-sample
+window. Without it the model returns ~0.001 on obvious speech and no turn ever
+ends — measured mean probability 0.936 with the context, 0.008 without.
+
+**The first microphone access fails on macOS**
+That is TCC: the permission prompt appears on the *first* attempt and the
+attempt itself fails. Grant access and re-run.
 
 **A benchmark result looks too good**
 Make sure the circuit breaker is disabled for the run. A model emitting a few

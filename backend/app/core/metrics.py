@@ -154,7 +154,34 @@ class M:
     LLM_SHADOW_DISAGREEMENT = "llm.shadow_disagreement"
     ANALYSER_LATENCY = "llm.analyser_total_latency"
 
-    # Reserved for later milestones so names are agreed up-front.
+    # --- Voice pipeline (Milestone 3) --------------------------------------
+    # Label values are closed sets only (provider, model, reason code, voice
+    # state). Never a transcript, a phrase, or anything caller-specific.
     STT_LATENCY = "speech.stt_latency"
+    STT_REAL_TIME_FACTOR = "speech.stt_rtf_pct"
+    STT_EMPTY = "speech.stt_empty"
+    STT_HALLUCINATION_DISCARDED = "speech.stt_hallucination_discarded"
+
+    TTS_TOTAL_LATENCY = "speech.tts_total_latency"
+    TTS_CACHE_HIT = "speech.tts_cache_hit"
+    TTS_CACHE_MISS = "speech.tts_cache_miss"
+
+    VAD_SPEECH_START_LATENCY = "speech.vad_speech_start_latency"
+    VAD_ENDPOINT_LATENCY = "speech.vad_endpoint_latency"
+
+    VOICE_SESSIONS = "voice.sessions"
+    VOICE_TURNS = "voice.turns"
+    VOICE_TIME_TO_FIRST_AUDIO = "voice.time_to_first_audio"
+    VOICE_BARGE_IN_LATENCY = "voice.barge_in_latency"
+    VOICE_TURN_CANCELLED = "voice.turn_cancelled"
+    VOICE_STALE_RESPONSE_DISCARDED = "voice.stale_response_discarded"
+    VOICE_ACKNOWLEDGEMENT_PLAYED = "voice.acknowledgement_played"
+    VOICE_NO_SPEECH = "voice.no_speech"
+    VOICE_UTTERANCE_TOO_LONG = "voice.utterance_too_long"
+    VOICE_ERROR = "voice.error"
+
+    AUDIO_INPUT_OVERRUN = "audio.input_overrun"
+    AUDIO_OUTPUT_UNDERRUN = "audio.output_underrun"
+    AUDIO_INPUT_QUEUE_DEPTH = "audio.input_queue_depth"
     TTS_FIRST_AUDIO = "speech.tts_first_audio_latency"
     BARGE_IN = "speech.barge_in"

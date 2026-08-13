@@ -127,11 +127,58 @@ class Settings(BaseSettings):
     # lets an idle clinic line pay a cold reload on the next call.
     llm_keep_alive: str = "30m"
 
-    stt_provider: Literal["none", "faster_whisper", "whispercpp"] = "none"
-    stt_model: str = "small.en"
+    # --- Voice pipeline (Milestone 3) --------------------------------------
+    # All default to "none": the text deployment must not need audio libraries,
+    # models or a sound card. See docs/architecture/voice-pipeline.md.
+    stt_provider: Literal["none", "faster_whisper"] = "none"
+    # base.en measured as the best accuracy/latency balance on this hardware;
+    # tiny.en is faster but garbles ordinary speech, small.en is ~3x slower.
+    stt_model: str = "base.en"
+    stt_language: str = "en"
+    stt_compute_type: str = "int8"
+    stt_beam_size: int = 1
+    # Bias decoding toward practitioner and appointment-type names. Clinic
+    # vocabulary only — never patient data.
+    stt_vocabulary_bias: bool = True
+
     tts_provider: Literal["none", "piper"] = "none"
-    tts_voice: str = "en_AU-lessac-medium"
-    vad_provider: Literal["none", "silero", "webrtc"] = "none"
+    # Path to a Piper .onnx voice. Piper ships no en_AU voice, so en_GB is the
+    # closest available for an Australian clinic. `alan` was chosen over `alba`
+    # on measured intelligibility, not preference: alba is a Scottish voice and
+    # rendered "away" as "a wee" and a street address as "RAT-40, 2-RIVICIDE
+    # DRIVE". scripts/benchmark_tts.py reproduces both.
+    tts_voice: str = "models/piper/en_GB-alan-medium.onnx"
+    # <1.0 speaks faster. None keeps the voice's own pacing.
+    tts_length_scale: float | None = None
+    tts_cache_entries: int = 64
+
+    vad_provider: Literal["none", "silero", "energy"] = "none"
+    vad_model: str = "models/silero/silero_vad.onnx"
+    vad_threshold: float = 0.5
+
+    # --- Endpointing -------------------------------------------------------
+    # Silence after speech that ends a turn. 500 ms measured as the balance
+    # between cutting people off and feeling sluggish; see the voice benchmark.
+    voice_end_silence_ms: int = 500
+    # How long to wait for the caller to say anything at all.
+    voice_initial_silence_ms: int = 6_000
+    # Shorter bursts are a cough or a door, not a turn.
+    voice_min_speech_ms: int = 200
+    # Hard cap so a stuck line cannot buffer minutes of audio.
+    voice_max_utterance_ms: int = 20_000
+
+    # --- Voice behaviour ---------------------------------------------------
+    # Speak a short acknowledgement if the caller has heard nothing this long
+    # after they stopped talking. Endpointing and transcription come out of the
+    # same budget, so this is not "how long the engine gets".
+    voice_acknowledgement_after_ms: int = 900
+    voice_acknowledgement_enabled: bool = True
+    # Consecutive speech frames required to treat speech-over-agent as a real
+    # barge-in. Raise it if speaker bleed causes false interruptions.
+    voice_barge_in_frames: int = 1
+    # Audio devices: None uses the system default.
+    voice_input_device: str = ""
+    voice_output_device: str = ""
 
     asterisk_ari_url: str = "http://127.0.0.1:8088/ari"
     asterisk_ari_user: str = ""
@@ -168,6 +215,26 @@ class Settings(BaseSettings):
     @property
     def session_store_backend(self) -> Literal["redis", "memory"]:
         return "redis" if self.redis_url else "memory"
+
+    @property
+    def voice_configured(self) -> bool:
+        """Whether a full voice pipeline is available.
+
+        All three providers are required: STT with no TTS could hear but not
+        answer, and either without VAD could not tell when a turn ended.
+        """
+        return (
+            self.stt_provider != "none"
+            and self.tts_provider != "none"
+            and self.vad_provider != "none"
+        )
+
+    def device_or_default(self, configured: str) -> int | str | None:
+        """Resolve a configured audio device, falling back to the system default."""
+        value = configured.strip()
+        if not value:
+            return None
+        return int(value) if value.isdigit() else value
 
     @property
     def llm_configured(self) -> bool:

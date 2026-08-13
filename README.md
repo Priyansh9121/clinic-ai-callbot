@@ -6,11 +6,13 @@ callers to a human when it should, and redirects medical emergencies to Triple
 Zero — without letting a language model control anything clinical or
 transactional.
 
-> **Status: Milestones 1 and 2 complete.** The conversation engine, appointment
-> engine, safety engine and APIs work end to end over text, and a local LLM
-> improves natural-language understanding behind the same analyser interface.
-> There is no speech and no telephony yet — see
-> [Implementation status](#implementation-status).
+> **Status: Milestones 1, 2 and 3 complete.** The conversation engine,
+> appointment engine, safety engine and APIs work end to end over text; a local
+> LLM improves natural-language understanding behind the same analyser
+> interface; and you can now hold a spoken, interruptible conversation with it
+> through a local microphone and speaker. Everything — speech recognition,
+> synthesis and the language model — runs on the machine. There is no telephony
+> yet — see [Implementation status](#implementation-status).
 >
 > **All data in this repository is fictional.** "Riverside Medical Clinic", its
 > practitioners and its patients are synthetic development fixtures. This
@@ -161,6 +163,27 @@ will hear once speech is attached.
 
 Try `/state` to see the structured conversation memory, `/new` to restart.
 
+## Talk to it out loud
+
+```bash
+uv run python scripts/voice_chat.py                 # speak to it
+uv run python scripts/voice_chat.py --devices       # list audio devices
+uv run python scripts/voice_chat.py --show-state    # watch the state machine
+uv run python scripts/voice_chat.py --push-to-talk  # bypass VAD (debug aid)
+```
+
+Set `STT_PROVIDER`, `TTS_PROVIDER` and `VAD_PROVIDER` in `.env` first, and fetch
+the models — they are not in the repository. See
+[docs/architecture/voice-pipeline.md](docs/architecture/voice-pipeline.md).
+
+**Use headphones.** The pipeline listens while it speaks — that is what makes
+interruption work — so on open speakers the agent can hear itself and interrupt
+itself.
+
+Interrupt it mid-sentence and it stops immediately; the answer it was about to
+give is discarded rather than spoken over your next question. Nothing is
+recorded: audio lives in memory for one utterance and is then gone.
+
 ## Tests
 
 ```bash
@@ -168,11 +191,16 @@ cd backend
 uv run pytest                       # everything (needs the dev database)
 uv run pytest -m "not integration"  # unit + NLU + safety only, no database
 uv run pytest tests/safety -v
+uv run pytest -m llm_live           # opt-in: needs a local Ollama model
+uv run pytest -m voice_live         # opt-in: needs the speech models on disk
 uv run ruff check . && uv run ruff format --check .
 ```
 
 Integration tests use a separate `clinic_callbot_test` database, created by
 `scripts/dev_services.sh init`. Override with `TEST_DATABASE_URL`.
+
+`uv run pytest` must pass on a machine with no Ollama, no speech models and no
+sound card, so the live-engine suites are deselected by default.
 
 ---
 
@@ -199,7 +227,17 @@ backend/app/
 ├── schemas/          Pydantic request/response models
 ├── security/         auth + RBAC, rate limiting, security headers
 ├── services/         call metadata
-└── speech/           VAD/STT/TTS interfaces (Milestone 3 — interfaces only)
+├── speech/           VAD, STT, TTS engines behind the Milestone 1 interfaces
+│   ├── audio.py        the canonical audio format — the only conversion point
+│   ├── vad/            Silero ONNX + a dependency-free energy fallback
+│   ├── stt/            faster-whisper
+│   └── tts/            Piper + an allowlisted phrase cache
+└── voice/            voice orchestration (Milestone 3)
+    ├── session.py      turns, barge-in, cancellation, stale-turn guard
+    ├── endpointing.py  when has the caller finished speaking
+    ├── states.py       VoiceState + turn tokens
+    ├── devices.py      microphone and speaker
+    └── transport.py    AudioInput/AudioOutput — the telephony seam
 ```
 
 Deviations from the originally specified layout, and why:
@@ -211,8 +249,14 @@ Deviations from the originally specified layout, and why:
 | `conversation/handlers/` holds one module per *flow*, not per state | 24 states, 4 tasks. Per-state classes would have duplicated the slot-filling logic four times over. |
 | `conversation/vocabulary.py` added | Entity extraction needs clinic records to resolve against. Keeping the loader separate keeps the NLU pure and testable. |
 
+`app/voice/` is an *adapter*, not a second engine. It calls the unchanged text
+seam — `handle_message(session_id, text)` — so every clinic, safety and
+verification rule has exactly one implementation, and a spoken sentence has
+precisely the reach of a typed one.
+
 See [`docs/architecture/`](docs/architecture/) for the turn pipeline, datetime
-rules and the latency budget.
+rules, the latency budget and the
+[voice pipeline](docs/architecture/voice-pipeline.md).
 
 ## Booking safety
 
@@ -345,6 +389,33 @@ so a typical booking conversation makes ~5 model calls rather than one per turn.
 Architecture, failure handling, privacy boundary and benchmark method:
 [`docs/architecture/llm.md`](docs/architecture/llm.md).
 
+### Measured voice latency
+
+Apple M2, 8 GB. faster-whisper `base.en` (int8, CPU), Piper `en_GB-alan-medium`,
+Silero VAD v5, `qwen2.5:1.5b-instruct`. Reproduce with
+`uv run python scripts/benchmark_voice.py --sweep-endpointing`.
+
+| Stage | Median | p95 | Target | |
+|---|---|---|---|---|
+| VAD speech-start detection | 100 ms | 120 ms | < 150 ms | ✅ |
+| STT (warm, per utterance) | 449 ms | 1622 ms | < 500 ms | ✅ |
+| TTS time to first audio | 135 ms | 278 ms | < 300 ms | ✅ |
+| Barge-in playback stop | 0 ms | 0 ms | < 200 ms | ✅ |
+| **Speech end → first agent audio** | **1135 ms** | 1197 ms | < 700 ms | ❌ |
+
+The 700 ms target is missed and **cannot be met with this stack** — endpointing
+(561 ms) plus transcription (422 ms) is 983 ms before the first word is even
+known. The acknowledgement hides the LLM behind speech but cannot start before
+transcription returns. A streaming STT decoder is the only change that removes
+that floor rather than trading against it.
+
+Model selection was made on safety, not speed. `tiny.en` is ~240 ms faster and
+was rejected: it heard *"my face has gone **down** on one side"* for "gone
+**numb**", and read a date of birth as 1980 where the caller said 1982.
+
+Method, per-stage breakdown and the TTS voice comparison:
+[`docs/architecture/voice-pipeline.md`](docs/architecture/voice-pipeline.md).
+
 ## Environment variables
 
 Every variable is documented in [`.env.example`](.env.example). The ones worth
@@ -393,7 +464,7 @@ change is an explicit operational step, not a side effect of a restart.
 |---|---|---|
 | 1 | Database, appointments, conversation engine, safety, text API, simulator, tests | **complete** |
 | 2 | Local LLM behind the analyser interface, strict validation, hint resolution, fallback, shadow mode, benchmark | **complete** |
-| 3 | STT, TTS, VAD, streaming audio, barge-in, latency metrics | interfaces only |
+| 3 | STT, TTS, VAD, streaming audio, barge-in, latency metrics | **complete** |
 | 4 | Asterisk, PJSIP, external media gateway, AI-failure fallback | not started |
 | 5 | OTP verification, staff dashboard, RBAC UI, load and red-team testing | partial (RBAC + audit trail exist) |
 
@@ -418,11 +489,28 @@ change is an explicit operational step, not a side effect of a restart.
 - **No admin dashboard yet.** `frontend/` is an empty placeholder.
 - **`ruff format` is applied but not enforced in CI** — there is no CI pipeline
   in this repository yet.
-- **LLM latency is too high for the Milestone 3 voice budget.** ~1.2 s median
-  on this hardware against a ~800 ms total budget to first audio. Hybrid
-  routing hides it on most turns, but a model-consulted turn will be audible
-  once speech is attached. Options then: a smaller model, a faster host, or
-  speaking an acknowledgement while the model runs.
+- **The voice pipeline misses its first-audio target, by ~435 ms.** Measured
+  1135 ms median from speech end to first agent audio against a 700 ms target.
+  This is structural, not a tuning gap: endpointing plus transcription spend
+  983 ms before the agent can know what was said. The acknowledgement covers
+  the LLM's ~1.3 s but cannot start earlier than transcription. A streaming STT
+  decoder is the real fix; faster-whisper has none.
+- **Speech recognition is unreliable on non-Anglo names and Australian place
+  names.** Measured with `base.en`: "Nguyen, N G U Y E N" came back as "Nirian,
+  NTUYEN", "Siobhan" as "Chivorn", "Woolloomooloo" as "Willy Millie". Dates,
+  phone numbers and safety phrases survived intact, and the production parsers
+  recovered 3/3 dates of birth and mobile numbers — but identity confirmation
+  must not lean on spelling a name aloud.
+- **The speech accuracy numbers are measured on synthetic audio.** Nothing is
+  recorded, so the evaluation set is Piper reading scripted phrases: cleaner,
+  better-enunciated and noise-free compared with a real caller on a real line.
+  Treat every accuracy figure as an upper bound. A clinic-recorded set, under
+  consent, is needed before deployment.
+- **Barge-in on open speakers makes the agent interrupt itself.** The
+  microphone is deliberately never gated on playback, so it hears the speaker.
+  Use headphones, or raise `VOICE_BARGE_IN_FRAMES`. Acoustic echo cancellation
+  is not implemented — on a phone line the far-end echo profile is different
+  enough that it belongs with Milestone 4.
 - **The model is only ~71% accurate on hard indirect phrasing**, so it
   misreads some utterances — it read "Something's come up and my booking won't
   work anymore" as a cancellation rather than a reschedule. The deterministic
