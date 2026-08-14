@@ -209,9 +209,7 @@ async def test_repeating_an_offered_time_selects_it_instead_of_searching_again(
     assert session.booking.selected_slot_id == wanted.id
 
 
-async def test_a_time_that_was_not_offered_is_still_a_correction(
-    caller, db, clinic_data
-) -> None:
+async def test_a_time_that_was_not_offered_is_still_a_correction(caller, db, clinic_data) -> None:
     """The other half: the fix must not swallow a genuine change of mind.
 
     "Make it 7 am" when no 7 am was offered is a caller changing what they

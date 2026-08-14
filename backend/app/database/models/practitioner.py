@@ -19,7 +19,9 @@ class Practitioner(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "practitioners"
 
     clinic_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("clinics.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("clinics.id", ondelete="CASCADE"),
+        nullable=False,
         index=True,
     )
     # Primary/home location. A practitioner may still have slots elsewhere;

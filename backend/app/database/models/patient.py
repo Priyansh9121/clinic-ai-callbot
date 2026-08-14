@@ -32,7 +32,9 @@ class Patient(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     clinic_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("clinics.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("clinics.id", ondelete="CASCADE"),
+        nullable=False,
         index=True,
     )
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)

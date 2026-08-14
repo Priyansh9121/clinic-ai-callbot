@@ -23,7 +23,9 @@ class AppointmentType(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     clinic_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("clinics.id", ondelete="CASCADE"), nullable=False,
+        PgUUID(as_uuid=True),
+        ForeignKey("clinics.id", ondelete="CASCADE"),
+        nullable=False,
         index=True,
     )
     # Stable machine key used by the conversation engine, so renaming the

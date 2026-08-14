@@ -32,7 +32,9 @@ class AuditEvent(UUIDPrimaryKeyMixin, Base):
         PgUUID(as_uuid=True), ForeignKey("clinics.id", ondelete="SET NULL")
     )
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    action: Mapped[AuditAction] = mapped_column(pg_enum(AuditAction, "audit_action"), nullable=False)
+    action: Mapped[AuditAction] = mapped_column(
+        pg_enum(AuditAction, "audit_action"), nullable=False
+    )
 
     actor_type: Mapped[ActorType] = mapped_column(pg_enum(ActorType, "actor_type"), nullable=False)
     # Staff username / session id / "system". Never a patient's name.

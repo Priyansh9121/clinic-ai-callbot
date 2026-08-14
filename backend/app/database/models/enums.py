@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 class SlotStatus(StrEnum):
     AVAILABLE = "AVAILABLE"
-    HELD = "HELD"       # transiently reserved mid-conversation
+    HELD = "HELD"  # transiently reserved mid-conversation
     BOOKED = "BOOKED"
     BLOCKED = "BLOCKED"  # leave, admin block, closed period
 

@@ -91,7 +91,9 @@ class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PgUUID(as_uuid=True), ForeignKey("locations.id", ondelete="RESTRICT"), nullable=False
     )
     appointment_type_id: Mapped[uuid.UUID] = mapped_column(
-        PgUUID(as_uuid=True), ForeignKey("appointment_types.id", ondelete="RESTRICT"), nullable=False
+        PgUUID(as_uuid=True),
+        ForeignKey("appointment_types.id", ondelete="RESTRICT"),
+        nullable=False,
     )
     availability_slot_id: Mapped[uuid.UUID | None] = mapped_column(
         PgUUID(as_uuid=True), ForeignKey("availability_slots.id", ondelete="SET NULL")
