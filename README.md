@@ -294,6 +294,19 @@ See [`docs/architecture/`](docs/architecture/) for the turn pipeline, datetime
 rules, the latency budget and the
 [voice pipeline](docs/architecture/voice-pipeline.md).
 
+### Documentation index
+
+| Document | Covers |
+|---|---|
+| [development/local-sip.md](docs/development/local-sip.md) | Asterisk, ARI, AudioSocket, extensions 600/700, live acceptance |
+| [operations/runbook.md](docs/operations/runbook.md) | startup, shutdown, verified restart drill, how a clinic administers the system |
+| [operations/configuration.md](docs/operations/configuration.md) | which of the four stores owns each setting, and the one real overlap |
+| [operations/backup-recovery.md](docs/operations/backup-recovery.md) | verified PostgreSQL dump/restore drill, what is deliberately not backed up |
+| [architecture/slot-booking.md](docs/architecture/slot-booking.md) | why booking is optimistic and `SlotStatus.HELD` is unused |
+| [telephony/sip-trunk.md](docs/telephony/sip-trunk.md) | how a real phone number would connect. Design only — no trunk exists |
+| [security/safety-engine.md](docs/security/safety-engine.md) | the deterministic emergency path |
+| [privacy/data-inventory.md](docs/privacy/data-inventory.md) | what is stored, what is logged, what is not |
+
 ## Booking safety
 
 ```

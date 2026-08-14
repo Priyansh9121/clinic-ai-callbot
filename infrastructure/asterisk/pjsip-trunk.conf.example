@@ -1,0 +1,100 @@
+;
+; SIP trunk — Phase B. NOT ENABLED, and not yet exercised against a provider.
+;
+; Copy into pjsip.conf (or Include it) and substitute the ${...} placeholders.
+; NO REAL PROVIDER CREDENTIALS IN THIS REPOSITORY, ever. A committed SIP secret
+; is toll fraud waiting to happen; see T13 in docs/security/threat-model.md.
+;
+; Read docs/telephony/sip-trunk.md before enabling any of this.
+;
+; The path a real call takes:
+;
+;   PSTN → provider → this trunk → [from-trunk] → health gate
+;        → Stasis(clinic-ai) → AI, or → reception on any doubt
+;
+
+; ---------------------------------------------------------------------------
+; Transport.
+;
+; UDP is what most providers still default to and carries no confidentiality:
+; signalling, including the DID and caller ID, is readable on the wire. Prefer
+; TLS where the provider supports it, and note that TLS protects signalling
+; only — media needs SRTP separately (see the media section below).
+; ---------------------------------------------------------------------------
+[transport-trunk]
+type=transport
+protocol=udp                       ; or: tls
+bind=${TRUNK_BIND_ADDRESS}         ; e.g. 0.0.0.0:5060 on the PBX host
+; NAT: set both when the PBX is behind a router doing address translation.
+; Without them Asterisk advertises its private address in SDP and the provider
+; sends media into a black hole — the classic "call connects, no audio".
+external_signaling_address=${PUBLIC_IP}
+external_media_address=${PUBLIC_IP}
+local_net=${PRIVATE_SUBNET}        ; e.g. 192.168.0.0/16
+
+; For TLS:
+; cert_file=${TLS_CERT_FILE}
+; priv_key_file=${TLS_KEY_FILE}
+; verify_server=yes
+
+
+; ---------------------------------------------------------------------------
+; The trunk endpoint.
+; ---------------------------------------------------------------------------
+[trunk]
+type=endpoint
+transport=transport-trunk
+; MUST NOT be ai-internal. Inbound callers are strangers: they may reach the
+; clinic AI and reception, and nothing else. A trunk pointed at the internal
+; context can dial every extension the softphones can.
+context=from-trunk
+disallow=all
+; G.711 only. The media path resamples to 16 kHz for Whisper, so a compressed
+; codec buys bandwidth at the cost of the transcription accuracy that decides
+; whether a symptom is heard correctly. ulaw for North America, alaw for
+; Europe/Australia — keep both and let the provider choose.
+allow=ulaw
+allow=alaw
+outbound_auth=trunk-auth
+aors=trunk
+; Asterisk must stay in the media path: AudioSocket cannot work if the RTP
+; flows directly between the provider and anything else.
+direct_media=no
+; Do not trust caller ID the provider did not authenticate.
+trust_id_inbound=no
+; Presented number for any outbound leg (a transfer to a mobile, say).
+from_user=${TRUNK_USERNAME}
+callerid=${CLINIC_NAME} <${CLINIC_DID}>
+; rtp_symmetric/rewrite_contact make NAT traversal work with most providers.
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+[trunk-auth]
+type=auth
+auth_type=userpass
+username=${TRUNK_USERNAME}
+password=${TRUNK_PASSWORD}
+
+[trunk]
+type=aor
+contact=sip:${TRUNK_HOST}
+qualify_frequency=60               ; detect a dead trunk before a caller does
+
+; Only accept traffic from the provider's signalling addresses. Without this,
+; anyone who can reach the port can present themselves as the trunk and place
+; calls on the clinic's account.
+[trunk]
+type=identify
+endpoint=trunk
+match=${TRUNK_HOST}
+
+; Registration — only if the provider requires it. Static-IP trunks do not.
+[trunk-registration]
+type=registration
+transport=transport-trunk
+outbound_auth=trunk-auth
+server_uri=sip:${TRUNK_HOST}
+client_uri=sip:${TRUNK_USERNAME}@${TRUNK_HOST}
+retry_interval=60
+forbidden_retry_interval=600       ; back off hard on 403 — do not hammer
