@@ -136,4 +136,4 @@ def configure_logging(settings: Settings) -> None:
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     # Bound explicitly rather than via ``add_logger_name``, which requires a
     # stdlib logger object; we render through structlog's PrintLogger.
-    return structlog.get_logger().bind(logger=name)  # type: ignore[no-any-return]
+    return structlog.get_logger().bind(logger=name)

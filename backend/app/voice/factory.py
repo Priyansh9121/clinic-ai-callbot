@@ -63,10 +63,17 @@ def build_voice_session(
     stt = build_stt(settings)
     tts = build_tts(settings)
     vad = build_vad(settings)
-    missing = [
-        name for name, provider in (("stt", stt), ("tts", tts), ("vad", vad)) if provider is None
-    ]
-    if missing:
+    # Tested as an explicit disjunction rather than through a comprehension so
+    # the three names are genuinely non-None below. The comprehension checked
+    # the same thing at runtime but left the static types Optional, which is
+    # how `SpeechToTextProvider | None` reached a parameter that cannot accept
+    # None — an AttributeError mid-call if the guard were ever weakened.
+    if stt is None or tts is None or vad is None:
+        missing = [
+            name
+            for name, provider in (("stt", stt), ("tts", tts), ("vad", vad))
+            if provider is None
+        ]
         raise ProviderUnavailableError(
             detail=f"voice providers not configured: {', '.join(missing)}",
             public_message="The voice pipeline is not configured.",

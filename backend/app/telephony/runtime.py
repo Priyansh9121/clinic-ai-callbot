@@ -25,10 +25,14 @@ from typing import TYPE_CHECKING, Any
 
 from app.clinic.factory import build_clinic_knowledge
 from app.conversation.engine import ConversationEngine
+from app.conversation.nlu.baseline import MessageAnalyser
+from app.conversation.store import SessionStore
 from app.core.config import Settings
+from app.core.errors import ProviderUnavailableError
 from app.core.logging import get_logger
 from app.database.session import get_sessionmaker
 from app.safety.engine import SafetyEngine
+from app.speech.providers import SpeechToTextProvider, TextToSpeechProvider
 from app.telephony.factory import build_telephony_service
 from app.voice.factory import session_config
 from app.voice.session import VoiceSession
@@ -47,7 +51,9 @@ class TelephonyVoiceFactory:
     Whisper's weights per call would add seconds to every answer.
     """
 
-    def __init__(self, *, settings: Settings, analyser: object, store: object) -> None:
+    def __init__(
+        self, *, settings: Settings, analyser: MessageAnalyser, store: SessionStore
+    ) -> None:
         self._settings = settings
         self._analyser = analyser
         self._store = store
@@ -59,8 +65,20 @@ class TelephonyVoiceFactory:
         # Built once, shared across calls.
         from app.speech.factory import build_stt, build_tts, build_vad
 
-        self._stt = build_stt(settings)
-        self._tts = build_tts(settings)
+        stt = build_stt(settings)
+        tts = build_tts(settings)
+        # Checked here rather than per call: telephony_configured already
+        # requires all three, so a None at this point is a configuration bug
+        # and must surface at start-up, not as an AttributeError once a caller
+        # is already on the line.
+        if stt is None or tts is None:
+            missing = [n for n, p in (("stt", stt), ("tts", tts)) if p is None]
+            raise ProviderUnavailableError(
+                detail=f"voice providers not configured: {', '.join(missing)}",
+                public_message="The voice pipeline is not configured.",
+            )
+        self._stt: SpeechToTextProvider = stt
+        self._tts: TextToSpeechProvider = tts
         self._vad_settings = settings
         self._build_vad = build_vad
 
@@ -68,6 +86,12 @@ class TelephonyVoiceFactory:
         self._open: dict[int, Any] = {}
 
     def __call__(self, audio_in: Any, audio_out: Any, on_event: Any) -> VoiceSession:
+        vad = self._build_vad(self._vad_settings)
+        if vad is None:  # pragma: no cover - guarded at construction
+            raise ProviderUnavailableError(
+                detail="voice providers not configured: vad",
+                public_message="The voice pipeline is not configured.",
+            )
         sessionmaker = get_sessionmaker()
         db = sessionmaker()
         engine = ConversationEngine(
@@ -84,7 +108,7 @@ class TelephonyVoiceFactory:
             audio_output=audio_out,
             # VAD holds per-call state, so it is built per call. STT and TTS
             # do not, and are shared.
-            vad=self._build_vad(self._vad_settings),
+            vad=vad,
             stt=self._stt,
             tts=self._tts,
             config=session_config(self._settings, greet=True),

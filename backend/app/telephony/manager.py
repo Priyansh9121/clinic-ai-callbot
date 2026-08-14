@@ -32,7 +32,7 @@ from enum import StrEnum
 from app.conversation.responses import TRANSFER_UNAVAILABLE
 from app.core.logging import get_logger
 from app.core.metrics import M, metrics
-from app.telephony.control import HangupCause, TransferResult
+from app.telephony.control import CallController, HangupCause, TransferResult
 from app.telephony.destinations import DestinationRegistry, UnknownDestination
 from app.telephony.metadata import CallerIdentity, CallMetadata
 from app.telephony.states import CallState, IllegalCallTransition, next_state
@@ -104,9 +104,11 @@ class CallSession:
         self,
         *,
         call_id: str,
-        controller: object,  # CallController; Protocol avoided here to dodge a cycle
+        controller: CallController,
         channel: AudioSocketChannel,
-        voice_session_factory: Callable[[AudioSocketInput, AudioSocketOutput, Callable], object],
+        voice_session_factory: Callable[
+            [AudioSocketInput, AudioSocketOutput, Callable], VoiceSession
+        ],
         destinations: DestinationRegistry,
         hangup_drain_ms: int = DEFAULT_HANGUP_DRAIN_MS,
         max_call_seconds: int = DEFAULT_MAX_CALL_SECONDS,

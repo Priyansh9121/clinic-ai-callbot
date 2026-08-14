@@ -127,7 +127,11 @@ class DestinationRegistry:
         failing: a caller who needs a human should reach one even if the reason
         code is something this table has not seen.
         """
-        destination = _REASON_TO_DESTINATION.get(reason, TransferDestination.RECEPTION)
+        destination = (
+            TransferDestination.RECEPTION
+            if reason is None
+            else _REASON_TO_DESTINATION.get(reason, TransferDestination.RECEPTION)
+        )
         try:
             return self.resolve(destination)
         except UnknownDestination:

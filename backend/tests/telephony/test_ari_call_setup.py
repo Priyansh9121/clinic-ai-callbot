@@ -361,3 +361,31 @@ def test_a_real_ari_password_configures_telephony() -> None:
     settings = _telephony_settings(asterisk_ari_password="an-actual-generated-secret")
 
     assert settings.telephony_configured is True
+
+
+# --- The handler that must never itself fail --------------------------------
+async def test_a_handler_that_raises_does_not_end_the_event_stream() -> None:
+    """One malformed event must not take every future call down with it.
+
+    _dispatch catches a failing handler and logs it, and that logging call
+    passed `event=` — which is structlog's own first parameter. It raised
+    TypeError inside the recovery path, so the very handler protecting the
+    stream would have broken it. Found by mypy, reproduced, then fixed.
+    """
+    from app.telephony.ari import AriClient
+
+    client = AriClient(
+        base_url="http://127.0.0.1:8088/ari",
+        username="test",
+        password="test-only-not-a-real-secret",
+    )
+
+    async def explodes(_event: dict) -> None:
+        raise ValueError("malformed event")
+
+    client.on_event(explodes)
+    try:
+        # Must return, not raise: the stream survives a bad event.
+        await client._dispatch('{"type": "StasisStart"}')
+    finally:
+        await client.close()

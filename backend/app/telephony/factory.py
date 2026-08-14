@@ -6,6 +6,8 @@ Keeps construction out of the service and the CLI, mirroring
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from app.core.config import Settings
 from app.core.errors import ProviderUnavailableError
 from app.telephony.ari import AriClient
@@ -13,7 +15,14 @@ from app.telephony.destinations import DestinationRegistry, TransferDestination
 from app.telephony.manager import CallManager, CapacityPolicy
 from app.telephony.server import AudioSocketServer
 from app.telephony.service import TelephonyService
-from app.telephony.transport import TelephonyFormat
+from app.telephony.transport import AudioSocketInput, AudioSocketOutput, TelephonyFormat
+from app.voice.session import VoiceSession
+
+#: What CallSession needs from whatever builds its conversation: given the
+#: call's audio ends and an event sink, return the VoiceSession for that call.
+VoiceSessionFactory = Callable[
+    [AudioSocketInput, AudioSocketOutput, Callable[..., None]], VoiceSession
+]
 
 
 def wire_format(settings: Settings) -> TelephonyFormat:
@@ -55,7 +64,7 @@ def ari_client(settings: Settings) -> AriClient:
 def build_telephony_service(
     *,
     settings: Settings,
-    voice_factory: object,
+    voice_factory: VoiceSessionFactory,
 ) -> TelephonyService:
     """Assemble the service, raising if telephony is not fully configured."""
     if not settings.telephony_configured:

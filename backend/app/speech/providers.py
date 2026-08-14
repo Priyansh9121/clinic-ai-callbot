@@ -79,7 +79,10 @@ class SpeechToTextProvider(Protocol):
         """Transcribe a complete utterance."""
         ...
 
-    async def transcribe_stream(self, frames: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    # `def`, not `async def`, for the same reason as synthesize_stream below:
+    # the implementation is an async generator, so calling it returns the
+    # iterator rather than a coroutine to await.
+    def transcribe_stream(self, frames: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
         """Yield partial transcripts, then a final one."""
         ...
 
@@ -98,7 +101,13 @@ class TextToSpeechProvider(Protocol):
 
     async def synthesize(self, text: str) -> bytes: ...
 
-    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]: ...
+    # Deliberately `def`, not `async def`. Every implementation is an async
+    # generator, and calling one returns the iterator immediately rather than a
+    # coroutine that must be awaited first — which is exactly what `def ... ->
+    # AsyncIterator[bytes]` describes. Declared `async def`, this said callers
+    # must write `async for c in await tts.synthesize_stream(t)`, which is not
+    # what any of them do and would fail at runtime.
+    def synthesize_stream(self, text: str) -> AsyncIterator[bytes]: ...
 
     async def warm_cache(self, phrases: tuple[str, ...]) -> None:
         """Pre-render fixed phrases (``responses.PREGENERATED``) so the common

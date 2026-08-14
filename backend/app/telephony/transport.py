@@ -147,7 +147,10 @@ class _StreamResampler:
         return (self._np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
     def convert(self, pcm: bytes) -> bytes:
-        if self._passthrough or not pcm:
+        # `_stream is None` is the same guard flush() already uses: it is only
+        # unset when passthrough, so this states the invariant rather than
+        # relying on the two flags never drifting apart.
+        if self._passthrough or self._stream is None or not pcm:
             return pcm
         samples = self._np.frombuffer(pcm, dtype="<i2").astype(self._np.float32) / 32768.0
         return self._to_bytes(self._stream.resample_chunk(samples))

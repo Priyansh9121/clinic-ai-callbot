@@ -186,9 +186,13 @@ class AriClient:
         except Exception as exc:
             # One malformed or unexpected event must not end the event stream
             # and with it every future call.
+            # NOT `event=`: that is structlog's own first parameter, and
+            # passing it as a keyword raises TypeError — inside the handler
+            # whose entire purpose is that one malformed event must not end
+            # the stream.
             logger.error(
                 "telephony.ari_handler_failed",
-                event=str(event.get("type")),
+                event_type=str(event.get("type")),
                 error=type(exc).__name__,
             )
 

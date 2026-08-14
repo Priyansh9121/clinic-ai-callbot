@@ -75,8 +75,9 @@ class PiperTTS:
             from piper import PiperVoice
 
             started = time.perf_counter()
-            self._voice = await asyncio.to_thread(PiperVoice.load, str(self._model_path))
-            self._sample_rate = self._voice.config.sample_rate
+            voice = await asyncio.to_thread(PiperVoice.load, str(self._model_path))
+            self._voice = voice
+            self._sample_rate = voice.config.sample_rate
             logger.info(
                 "tts.voice_loaded",
                 provider=self.name,
