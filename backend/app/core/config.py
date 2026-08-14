@@ -431,11 +431,32 @@ class Settings(BaseSettings):
         return self
 
 
+def _configuration_problem(exc: Exception) -> str:
+    """Name the settings that are wrong, without echoing what they contain.
+
+    A pydantic ValidationError renders the offending input, and the settings
+    most likely to be malformed are the ones carrying credentials: a bad
+    DATABASE_URL prints the password to stderr, where startup output is
+    routinely pasted into issues and chat. Report the field and the reason;
+    the operator can look up the value themselves.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return type(exc).__name__
+    try:
+        return "; ".join(
+            f"{'.'.join(str(p) for p in item.get('loc', ())) or '(root)'}: {item.get('msg', '')}"
+            for item in errors()
+        )
+    except Exception:  # pragma: no cover - defensive
+        return type(exc).__name__
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Cached settings accessor. Used as a FastAPI dependency and in services."""
     try:
         return Settings()
     except Exception as exc:  # pragma: no cover - startup failure path
-        print(f"FATAL: invalid configuration: {exc}", file=sys.stderr)
+        print(f"FATAL: invalid configuration: {_configuration_problem(exc)}", file=sys.stderr)
         raise

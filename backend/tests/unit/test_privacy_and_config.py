@@ -247,3 +247,63 @@ def test_timer_records_even_when_the_block_raises() -> None:
     with pytest.raises(RuntimeError), registry.timer("op"):
         raise RuntimeError("boom")
     assert registry.snapshot()["latency_ms"]["op"]["count"] == 1
+
+
+# --- Exception paths --------------------------------------------------------
+# The call sites in this codebase are careful: no logger.* call passes a name,
+# a transcript or a mobile as a keyword. Tracebacks are where patient data
+# actually escapes, because they quote the arguments that raised — and nothing
+# at the call site can prevent that.
+def test_a_traceback_is_scrubbed_before_it_is_rendered(capsys) -> None:
+    """The processor order is the control, so pin the order by its effect.
+
+    format_exc_info turns exc_info into an `exception` string. Run after
+    redaction, that string is never scrubbed — an asyncpg error carrying bound
+    parameters put a patient's mobile and date of birth straight into the log.
+    """
+    import structlog
+
+    from app.core.config import Settings
+    from app.core.logging import configure_logging, get_logger
+
+    configure_logging(Settings(_env_file=None, log_format="json"))
+    try:
+        raise ValueError("lookup failed for 0491570156 born 1958-03-14")
+    except ValueError:
+        get_logger("test").exception("patient.lookup_failed")
+
+    written = capsys.readouterr().err
+    structlog.reset_defaults()
+
+    assert "patient.lookup_failed" in written, "the event itself must still be logged"
+    assert "0491570156" not in written, "mobile survived in the traceback"
+    assert "1958-03-14" not in written, "date of birth survived in the traceback"
+
+
+def test_a_configuration_failure_does_not_print_the_value_that_failed() -> None:
+    """Startup output gets pasted into issues and chat.
+
+    The settings most likely to be malformed are the ones holding credentials,
+    and pydantic renders the offending input by default — so a bad DATABASE_URL
+    printed its password. Name the field and the reason, not the value.
+    """
+    from app.core.config import _configuration_problem
+
+    secret = "sup3rs3cr3t-not-a-real-password"  # noqa: S105
+    with pytest.raises(Exception) as raised:  # noqa: B017 - pydantic's own type
+        Settings(_env_file=None, database_url=f"mysql://u:{secret}@host/db")
+
+    message = _configuration_problem(raised.value)
+
+    assert secret not in message
+    assert "database_url" in message.lower()
+
+
+def test_the_database_engine_hides_bound_parameters() -> None:
+    """A failing statement must not raise with the patient values it was given."""
+    from app.database.session import create_engine
+
+    engine = create_engine(Settings(_env_file=None, database_url=VALID_DSN))
+
+    # AsyncEngine is a wrapper; the flag lives on the engine it wraps.
+    assert engine.sync_engine.hide_parameters is True

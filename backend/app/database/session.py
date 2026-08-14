@@ -26,6 +26,12 @@ def create_engine(settings: Settings) -> AsyncEngine:
         max_overflow=settings.database_max_overflow,
         pool_pre_ping=True,  # survives Postgres restarts / idle disconnects
         pool_recycle=1800,
+        # Keep bound parameters out of exception messages. Without this, a
+        # failing statement raises with the values it was given attached — so
+        # any integrity or connection error during a patient lookup carries
+        # that patient's name, date of birth and mobile into the traceback,
+        # and from there into the logs.
+        hide_parameters=True,
     )
 
 

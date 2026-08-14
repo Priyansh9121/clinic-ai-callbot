@@ -100,6 +100,14 @@ def configure_logging(settings: Settings) -> None:
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
+        # Render the traceback to a string BEFORE redacting, not after.
+        #
+        # This ordering is the whole point: format_exc_info turns exc_info into
+        # an `exception` string, and if it runs after redact_processor that
+        # string is never scrubbed. A traceback quotes the arguments that
+        # raised — an asyncpg error carries the bound parameters, so a failed
+        # patient lookup printed the name, date of birth and mobile in full.
+        structlog.processors.format_exc_info,
         redact_processor,  # must run last before rendering
     ]
     renderer: structlog.types.Processor = (
@@ -109,7 +117,7 @@ def configure_logging(settings: Settings) -> None:
     )
 
     structlog.configure(
-        processors=[*shared, structlog.processors.format_exc_info, renderer],
+        processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
