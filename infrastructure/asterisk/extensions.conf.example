@@ -11,17 +11,25 @@
 ;
 
 [globals]
-; Where the clinic AI's AudioSocket media server is listening, as *this PBX*
-; must dial it. With Asterisk in a VM that is the host's address on the VM
-; network (e.g. 192.168.65.1), never 127.0.0.1 — inside the VM that is the VM.
+; ${AI_BACKEND_HOST} — the machine running the clinic AI, as *this PBX* must
+; reach it. Substitute when copying this file. With Asterisk in a VM and the
+; application on the host, that is the host's address on the private VM network
+; (validated UTM topology: 192.168.65.1).
 ;
-; The application supplies this itself when it originates the media channel
-; (TELEPHONY_MEDIA_ADVERTISE_HOST), so these are only needed by a
+; NEVER 127.0.0.1 here. Evaluated inside the VM, loopback is the VM itself, so
+; the health check below silently fails and every caller takes the reception
+; fallback — the AI is never reached and nothing in the logs says why.
+;
+; Where the clinic AI's AudioSocket media server is listening. The application
+; supplies this itself when it originates the media channel
+; (TELEPHONY_MEDIA_ADVERTISE_HOST), so these two are only needed by a
 ; dialplan-driven AudioSocket setup.
-AI_MEDIA_HOST=192.168.65.1
+AI_MEDIA_HOST=${AI_BACKEND_HOST}
 AI_MEDIA_PORT=8090
 ; Health endpoint the dialplan consults before trusting the AI with a caller.
-AI_HEALTH_URL=http://127.0.0.1:8000/health/live
+; Must match the address the backend is actually bound to — uvicorn started on
+; 127.0.0.1 is unreachable from the VM however this global is set.
+AI_HEALTH_URL=http://${AI_BACKEND_HOST}:8000/health/live
 
 
 ; ---------------------------------------------------------------------------
@@ -68,7 +76,12 @@ exten => _2XX,1,Dial(PJSIP/${EXTEN},20)
 exten => s,1,NoOp(clinic AI entry)
  same => n,Answer()
  ; Short, hard timeout. A health check that is slow *is* a failure.
- same => n,Set(CURL_TIMEOUT=1)
+ ;
+ ; These are the option names func_curl actually reads. `CURL_TIMEOUT` is not
+ ; one of them — setting it does nothing, and a hung backend would then hold
+ ; the caller on a silent line for libcurl's default timeout instead.
+ same => n,Set(CURLOPT(conntimeout)=1)
+ same => n,Set(CURLOPT(httptimeout)=2)
  same => n,Set(AI_HEALTH=${CURL(${AI_HEALTH_URL})})
  same => n,GotoIf($["${AI_HEALTH}" = ""]?fallback)
  ; Hand the channel to the Stasis application. From here the clinic

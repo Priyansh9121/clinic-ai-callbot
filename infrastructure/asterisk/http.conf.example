@@ -1,13 +1,19 @@
 ;
 ; Asterisk's built-in HTTP server, which serves ARI. Copy to http.conf.
 ;
-; Bound to loopback. ARI carries the credential as HTTP Basic auth, so exposing
-; this port is equivalent to exposing the ability to answer, redirect and hang
-; up every call on the PBX.
+; ARI carries the credential as HTTP Basic auth, so exposing this port is
+; equivalent to exposing the ability to answer, redirect and hang up every call
+; on the PBX. Bind it as narrowly as the topology allows and never publicly.
+;
+; Loopback is correct only when the application shares a host with Asterisk.
+; With the application on the host and Asterisk in a VM it must bind the VM's
+; address on the private host network, or the backend cannot reach ARI at all:
+;
+;     ${ARI_BIND_ADDRESS} = 192.168.65.2   (validated UTM topology)
 ;
 [general]
 enabled=yes
-bindaddr=127.0.0.1
+bindaddr=${ARI_BIND_ADDRESS}
 bindport=8088
 ; Production: terminate TLS here or in front of it.
 ; tlsenable=yes

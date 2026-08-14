@@ -27,6 +27,33 @@ Role = Literal["admin", "staff", "readonly"]
 # below rejects it outright when APP_ENV=production.
 INSECURE_DEV_SECRET = "dev-insecure-secret-change-me-0000000000000000"  # noqa: S105
 
+# Spellings of "every interface here" and of the unspecified address. None of
+# them is a destination another machine can dial, so none may be handed to
+# Asterisk as one.
+_UNROUTABLE_HOSTS = frozenset({"", "0.0.0.0", "::", "0:0:0:0:0:0:0:0", "0", "*"})  # noqa: S104
+
+#: Values shipped in .env.example to be substituted at setup. They are not
+#: credentials, and treating them as ones costs an afternoon: the PBX answers
+#: every request with 401, which reads as a wrong password rather than as a
+#: password that was never set.
+PLACEHOLDER_SECRETS = frozenset({"CHANGE_ME", "change-me", "changeme", "change_me"})
+
+
+def is_placeholder(secret: str) -> bool:
+    """Whether *secret* is an unsubstituted template value rather than a secret."""
+    return secret.strip() in PLACEHOLDER_SECRETS
+
+
+def _is_routable_host(host: str) -> bool:
+    """Whether *host* is an address another machine can actually connect to.
+
+    Compared after trimming whitespace and any IPv6 brackets, because the
+    failure this prevents is silent: a wildcard reaches Asterisk as a dial
+    string, the call connects, and the caller hears nothing. A trailing space
+    is not a meaningful difference and must not buy a pass.
+    """
+    return host.strip().strip("[]").lower() not in _UNROUTABLE_HOSTS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -290,7 +317,23 @@ class Settings(BaseSettings):
     @property
     def media_advertise_is_routable(self) -> bool:
         """Whether the advertised address is something Asterisk can dial."""
-        return self.media_advertise_host not in ("0.0.0.0", "", "::", "*")  # noqa: S104
+        return _is_routable_host(self.media_advertise_host)
+
+    @property
+    def health_advertise_url(self) -> str:
+        """The ``/health/live`` URL the dialplan should be pointed at.
+
+        Asterisk reaches this process over the same network it reaches the
+        media listener on — same machine, same interface — so the media
+        advertise host answers this question too and no second setting is
+        needed to describe the topology.
+
+        What no setting can know is which address uvicorn was actually bound
+        to. ``--host 127.0.0.1`` is unreachable from the PBX however this
+        reads, which is why the status command prints it for comparison
+        rather than claiming it works.
+        """
+        return f"http://{self.media_advertise_host}:{self.app_port}/health/live"
 
     @property
     def telephony_configured(self) -> bool:
@@ -300,12 +343,20 @@ class Settings(BaseSettings):
         configuration answering calls it cannot converse on would be worse than
         not answering, because the dialplan's failover to reception only fires
         when we decline.
+
+        An unsubstituted placeholder counts as unconfigured, not as a wrong
+        password. It cannot authenticate, so starting on one buys nothing but a
+        permanent 401 reconnect loop and a ``/health`` that says ``down`` when
+        the truth is ``never set up``.
         """
+        credential = self.asterisk_ari_password.get_secret_value()
         return (
             self.telephony_enabled
             and self.voice_configured
             and bool(self.asterisk_ari_user)
-            and bool(self.asterisk_ari_password.get_secret_value())
+            and not is_placeholder(self.asterisk_ari_user)
+            and bool(credential)
+            and not is_placeholder(credential)
         )
 
     def device_or_default(self, configured: str) -> int | str | None:

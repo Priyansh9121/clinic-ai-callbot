@@ -20,7 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
-from app.core.config import get_settings  # noqa: E402
+from app.core.config import get_settings, is_placeholder  # noqa: E402
 from app.core.logging import configure_logging  # noqa: E402
 from app.telephony.destinations import UnsafeExtension  # noqa: E402
 from app.telephony.factory import ari_client, destination_registry, wire_format  # noqa: E402
@@ -78,10 +78,15 @@ async def main() -> int:
             missing.append("TELEPHONY_ENABLED")
         if not settings.voice_configured:
             missing.append("STT/TTS/VAD")
+        credential = settings.asterisk_ari_password.get_secret_value()
         if not settings.asterisk_ari_user:
             missing.append("ASTERISK_ARI_USER")
-        if not settings.asterisk_ari_password.get_secret_value():
+        elif is_placeholder(settings.asterisk_ari_user):
+            missing.append("ASTERISK_ARI_USER (still the template placeholder)")
+        if not credential:
             missing.append("ASTERISK_ARI_PASSWORD")
+        elif is_placeholder(credential):
+            missing.append("ASTERISK_ARI_PASSWORD (still the template placeholder)")
         print(f"  {YELLOW}missing: {', '.join(missing)}{RESET}")
 
     print(f"\n{BOLD}PBX (Asterisk ARI){RESET}")
@@ -97,12 +102,37 @@ async def main() -> int:
             build = (info.get("system") or {}).get("version", "unknown")
             print(f"  {'reachable':<22} {mark(True)}  {DIM}Asterisk {build}{RESET}")
         except Exception as exc:
-            print(f"  {'reachable':<22} {mark(False)}  {DIM}{type(exc).__name__}{RESET}")
-            print(f"  {DIM}is Asterisk running, and is ari.conf enabled?{RESET}")
+            # A rejected credential and an absent PBX are different problems
+            # with different fixes, and ARI reports both as a failed request.
+            # Saying "unreachable" when Asterisk answered sends you to debug
+            # the network instead of ari.conf.
+            rejected = "401" in str(exc) or "403" in str(exc)
+            detail = "credential rejected" if rejected else type(exc).__name__
+            print(f"  {'reachable':<22} {mark(False)}  {DIM}{detail}{RESET}")
+            if rejected:
+                print(f"  {YELLOW}Asterisk answered — the network is fine. ari.conf and .env"
+                      f" disagree.{RESET}")
+                print(f"  {DIM}The ari.conf SECTION NAME is the username: it must be"
+                      f" [{settings.asterisk_ari_user}], not the Stasis app name.{RESET}")
+            else:
+                print(f"  {DIM}is Asterisk running, and is ari.conf enabled?{RESET}")
         finally:
             await client.close()
     else:
         print(f"  {'reachable':<22} {DIM}not probed (no credentials configured){RESET}")
+
+    # The dialplan curls this before handing a caller to the AI. It runs inside
+    # the PBX, so loopback here means the PBX itself and every caller silently
+    # takes the reception fallback.
+    print(f"\n{BOLD}Backend health (dialplan failover){RESET}")
+    print(f"  {'AI_HEALTH_URL':<22} {settings.health_advertise_url}"
+          f"  {mark(settings.media_advertise_is_routable)}")
+    print(f"  {DIM}put this in the dialplan's [globals]; it must match the address"
+          f" uvicorn is bound to{RESET}")
+    if settings.app_host in ("127.0.0.1", "localhost", "::1"):
+        print(f"  {YELLOW}APP_HOST is loopback. Start the backend with --host 0.0.0.0 or the"
+              f" PBX cannot reach it.{RESET}")
+        print(f"  {DIM}(APP_HOST is not read by the uvicorn CLI — pass --host explicitly){RESET}")
 
     print(f"\n{BOLD}Media transport (AudioSocket){RESET}")
     fmt = wire_format(settings)

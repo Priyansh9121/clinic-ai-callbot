@@ -19,35 +19,49 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_placeholder
 from app.telephony.ari import AriError
 from app.telephony.factory import ari_client
 
 pytestmark = pytest.mark.telephony_live
 
 
-#: Placeholder values shipped in .env.example. Treated as "not configured"
-#: rather than "wrong password", so the suite skips instead of failing.
-_PLACEHOLDERS = {"", "CHANGE_ME", "change-me", "changeme"}
-
-
 @pytest.fixture(scope="module")
 def settings():
+    """The real configuration, skipped when it was never filled in.
+
+    Placeholders are "not configured" rather than "wrong password", so the
+    suite skips instead of failing. `is_placeholder` is shared with the
+    application so the two cannot drift: `telephony_configured` declines on
+    exactly the same values these tests skip on.
+    """
     config = get_settings()
-    if (
-        config.asterisk_ari_user in _PLACEHOLDERS
-        or config.asterisk_ari_password.get_secret_value() in _PLACEHOLDERS
-    ):
-        pytest.skip("ARI credentials are placeholders — set them to run live PBX tests")
+    credential = config.asterisk_ari_password.get_secret_value()
+    if not config.asterisk_ari_user or is_placeholder(config.asterisk_ari_user):
+        pytest.skip("ASTERISK_ARI_USER is unset or a placeholder")
+    if not credential or is_placeholder(credential):
+        pytest.skip("ASTERISK_ARI_PASSWORD is unset or a placeholder — substitute it in .env")
     return config
+
+
+def _is_auth_failure(exc: AriError) -> bool:
+    """Whether Asterisk answered and refused the credential."""
+    return "401" in str(exc) or "403" in str(exc)
 
 
 @pytest.fixture
 async def client(settings):
     ari = ari_client(settings)
-    if not await ari.ping():
-        await ari.close()
-        pytest.skip(f"no Asterisk reachable at {ari.safe_url}")
+    try:
+        await ari.asterisk_info()
+    except AriError as exc:
+        # A rejected credential must NOT skip. Asterisk answered — that is a
+        # misconfiguration these tests exist to catch, and skipping it reports
+        # a live, wrongly-configured PBX as "no PBX here", which is how a 401
+        # survives a green run. Only a genuinely absent PBX is a skip.
+        if not _is_auth_failure(exc):
+            await ari.close()
+            pytest.skip(f"no Asterisk reachable at {ari.safe_url}")
     try:
         yield ari
     finally:

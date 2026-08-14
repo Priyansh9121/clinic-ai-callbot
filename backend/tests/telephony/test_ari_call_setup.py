@@ -285,3 +285,79 @@ def test_the_advertised_host_is_what_asterisk_is_told_to_dial() -> None:
 
     assert service._media_advertise_host == "192.0.2.10"
     assert service._media_host == "0.0.0.0"  # noqa: S104
+
+
+@pytest.mark.parametrize(
+    "advertised",
+    [
+        "0.0.0.0 ",  # a trailing space is not a different address
+        " ",  # truthy, so it does not fall back to the bind host
+        "[::]",  # the same wildcard, spelled for a URL
+        "0:0:0:0:0:0:0:0",
+        "0",  # classic shorthand for the unspecified address
+    ],
+)
+def test_wildcards_are_refused_however_they_are_spelled(advertised: str) -> None:
+    """The guard is what stands between a typo and a silent, silent call.
+
+    Each of these reaches Asterisk as `AudioSocket/<it>:8090/<uuid>` and is not
+    dialable. A whitespace value is the nastiest: it is truthy, so it does not
+    fall back to the bind host, and it is not the empty string, so a naive
+    equality check waves it through.
+    """
+    from app.core.errors import ProviderUnavailableError
+    from app.telephony.factory import build_telephony_service
+
+    settings = _telephony_settings(
+        telephony_media_host="0.0.0.0",  # noqa: S104
+        telephony_media_advertise_host=advertised,
+    )
+
+    with pytest.raises(ProviderUnavailableError, match="ADVERTISE"):
+        build_telephony_service(settings=settings, voice_factory=lambda *_: None)
+
+
+# --- Health address: what the dialplan is told to curl ----------------------
+def test_the_health_url_is_advertised_on_the_pbx_facing_address() -> None:
+    """The dialplan curls this from inside the VM, so loopback is the VM.
+
+    Asterisk reaches this process on the same network it reaches the media
+    listener on, so the advertised media host answers this too — rather than a
+    second setting that could drift out of step with the first.
+    """
+    settings = _telephony_settings(
+        telephony_media_host="0.0.0.0",  # noqa: S104
+        telephony_media_advertise_host="192.0.2.10",  # TEST-NET-1, per RFC 5737
+        app_port=8000,
+    )
+
+    assert settings.health_advertise_url == "http://192.0.2.10:8000/health/live"
+
+
+def test_the_health_url_follows_the_bind_host_when_all_on_one_host() -> None:
+    """One host: the advertised address is legitimately loopback."""
+    settings = _telephony_settings(telephony_media_host="127.0.0.1", app_port=9000)
+
+    assert settings.health_advertise_url == "http://127.0.0.1:9000/health/live"
+
+
+# --- Credentials that were never actually set -------------------------------
+@pytest.mark.parametrize("placeholder", ["CHANGE_ME", "change-me", "changeme", " CHANGE_ME "])
+def test_an_unsubstituted_ari_password_is_not_a_configuration(placeholder: str) -> None:
+    """A placeholder cannot authenticate, so telephony must decline to start.
+
+    Starting on one buys a permanent 401 reconnect loop and a /health that
+    reports `down` — which reads as "the PBX is broken" when the truth is
+    "this was never filled in". Declining routes callers to reception and says
+    so, which is the failure the dialplan fallback exists to handle.
+    """
+    settings = _telephony_settings(asterisk_ari_password=placeholder)
+
+    assert settings.telephony_configured is False
+
+
+def test_a_real_ari_password_configures_telephony() -> None:
+    """The guard must not reject an ordinary credential."""
+    settings = _telephony_settings(asterisk_ari_password="an-actual-generated-secret")
+
+    assert settings.telephony_configured is True

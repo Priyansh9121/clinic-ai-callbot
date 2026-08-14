@@ -5,10 +5,10 @@ no phone number. A softphone on your own machine calls the AI extension through
 a local Asterisk.
 
 ```
-softphone (ext 200) ──SIP──► Asterisk ──ARI──► clinic AI (control)
-                                  └──AudioSocket──► clinic AI (media)
-                             │
-                             └──transfer──► reception (ext 100)
+softphone (ext 1001) ──SIP──► Asterisk ──ARI──► clinic AI (control)
+                                   └──AudioSocket──► clinic AI (media)
+                              │
+                              └──transfer──► reception (ext 100)
 ```
 
 ## Validated topology
@@ -92,6 +92,28 @@ cd infrastructure/asterisk
 for f in *.conf.example; do cp "$f" "${f%.example}"; done
 ```
 
+The placeholders to substitute, and what each means:
+
+| Placeholder | In | Validated value | Meaning |
+|---|---|---|---|
+| `${ARI_BIND_ADDRESS}` | `http.conf` | `192.168.65.2` | the VM's address, so the Mac can reach ARI |
+| `${SIP_BIND_ADDRESS}` | `pjsip.conf` | `192.168.65.2:5060` | the VM's address, so the softphone can register |
+| `${AI_BACKEND_HOST}` | `extensions.conf` | `192.168.65.1` | the **Mac**, as the VM sees it |
+| `${SIP_1001_PASSWORD}` | `pjsip.conf` | generated | softphone secret |
+| `${SIP_RECEPTION_PASSWORD}` | `pjsip.conf` | generated | transfer-target secret |
+| `${ASTERISK_ARI_PASSWORD}` | `ari.conf` | generated | must equal the `.env` value |
+
+Every one of these is loopback in a single-host setup and must **not** be
+loopback once Asterisk is in a VM. `127.0.0.1` evaluated inside the VM is the
+VM, which is the single most common cause of a call that connects to silence.
+
+**The softphone's `context` in `pjsip.conf` must name a context that exists in
+`extensions.conf`** — both ship as `ai-internal`. Asterisk does not fall back
+to a default: a context that is not defined rejects the call outright, so even
+the 600 audio test fails and the symptom points nowhere useful.
+`test_every_endpoint_context_exists_in_the_dialplan` pins the two templates
+together.
+
 The populated `*.conf` files are **gitignored** — they hold real SIP and ARI
 passwords, and only the `*.conf.example` templates are tracked. A test
 (`test_populated_asterisk_configs_cannot_be_committed`) pins that, because the
@@ -104,18 +126,33 @@ Generate real secrets — do not invent them:
 openssl rand -base64 24   # once per endpoint, and for the ARI password
 ```
 
-Then set the matching values in your `.env`:
+Then set the matching values in your `.env` (values below are the validated VM
+topology; on a single host use `127.0.0.1` throughout and leave the advertise
+host empty):
 
 ```bash
 TELEPHONY_ENABLED=true
-ASTERISK_ARI_URL=http://127.0.0.1:8088/ari
-ASTERISK_ARI_USER=clinic-ai
+ASTERISK_ARI_URL=http://192.168.65.2:8088/ari
+ASTERISK_ARI_USER=ai-callbot
 ASTERISK_ARI_PASSWORD=<the same secret as ari.conf>
 ASTERISK_APP_NAME=clinic-ai
-TELEPHONY_MEDIA_HOST=127.0.0.1
+TELEPHONY_MEDIA_HOST=0.0.0.0
+TELEPHONY_MEDIA_ADVERTISE_HOST=192.168.65.1
 TELEPHONY_MEDIA_PORT=8090
 RECEPTION_EXTENSION=100
 ```
+
+> **`ASTERISK_ARI_USER` is not `ASTERISK_APP_NAME`.** They sit next to each
+> other and they are different things. The ARI *user* (`ai-callbot`) is the
+> **section name** in `ari.conf` — `[ai-callbot]` — and it is what HTTP Basic
+> authenticates. The *app* (`clinic-ai`) is the Stasis application the dialplan
+> hands channels to. Naming the `ari.conf` section after the app produces a
+> `401 {"message": "Authentication required"}` that looks exactly like a wrong
+> password, so check the section name first.
+>
+> `scripts/telephony_status.py` distinguishes the two cases: it reports
+> `credential rejected` when Asterisk answered and refused, rather than
+> `down`, which would send you to debug the network.
 
 `.env` is gitignored. **No real secret belongs in the repository**, including
 in the `.conf.example` files.
@@ -137,10 +174,10 @@ Any standard SIP client works — the architecture is client-independent. Config
 
 | Setting | Value |
 |---|---|
-| SIP server / domain | the Asterisk host (`127.0.0.1` if local) |
+| SIP server / domain | the Asterisk host (`192.168.65.2` for the VM topology) |
 | Port | 5060 |
-| Username / auth user | `200` |
-| Password | the `SIP_200_PASSWORD` you generated |
+| Username / auth user | `1001` |
+| Password | the `SIP_1001_PASSWORD` you generated |
 | Transport | UDP |
 | Codec | G.711 μ-law (PCMU) — disable everything else for Phase A |
 
@@ -168,7 +205,8 @@ where to look instead of leaving you guessing.
 ### 1. Start the VM and confirm Asterisk
 
 ```bash
-/Applications/UTM.app/Contents/MacOS/utmctl start "AIIL UTM Ubuntu 22.04"
+/Applications/UTM.app/Contents/MacOS/utmctl list          # find the Asterisk VM
+/Applications/UTM.app/Contents/MacOS/utmctl start "<your Asterisk VM>"
 # in the VM:
 sudo systemctl status asterisk
 asterisk -V                                     # expect 18+ (validated on 20.6.0)
@@ -207,15 +245,29 @@ curl -s -o /dev/null -w "%{http_code}\n" http://<VM_IP>:8088/ari/asterisk/info
 
 Telephony starts inside the FastAPI lifespan — there is no separate daemon.
 
+**Bind an address the VM can reach.** The dialplan curls `/health/live` before
+it will hand a caller to the AI, and it does that from inside the VM. Bound to
+`127.0.0.1` the backend is unreachable from there, the check fails, and every
+caller is routed to reception having never reached the AI.
+
 ```bash
-cd backend && uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
+cd backend && uv run uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 ```
+
+`APP_HOST` and `APP_PORT` in `.env` are **not** read by the uvicorn CLI — pass
+`--host` explicitly. Keep this on the private VM network; nothing here is
+authenticated.
 
 Look for `telephony.started` and `telephony.media_listening` in the log, then:
 
 ```bash
 curl -s localhost:8000/health | python3 -m json.tool | grep -A2 telephony
+# and, from inside the VM, the address the dialplan will actually use:
+curl -s http://192.168.65.1:8000/health/live
 ```
+
+`scripts/telephony_status.py` prints the exact `AI_HEALTH_URL` to put in the
+dialplan, derived from `TELEPHONY_MEDIA_ADVERTISE_HOST` and `APP_PORT`.
 
 ### 5. Confirm the PBX can see the application
 
@@ -269,7 +321,7 @@ then the VM.
 ```bash
 # Ctrl-C the backend
 ./scripts/dev_services.sh stop
-/Applications/UTM.app/Contents/MacOS/utmctl stop "AIIL UTM Ubuntu 22.04"
+/Applications/UTM.app/Contents/MacOS/utmctl stop "<your Asterisk VM>"
 ```
 
 ---

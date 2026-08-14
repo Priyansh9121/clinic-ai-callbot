@@ -9,7 +9,13 @@
 ;
 
 ; ---------------------------------------------------------------------------
-; Transport. Bound to the development host only.
+; Transport.
+;
+; `bind` must be an address the softphone can reach. With Asterisk in a VM and
+; the softphone on the host, 127.0.0.1 is the VM itself and no registration can
+; ever arrive — substitute the VM's address on the private host network:
+;
+;     ${SIP_BIND_ADDRESS} = 192.168.65.2:5060   (validated UTM topology)
 ;
 ; Do NOT bind 0.0.0.0 on a machine reachable from the internet. An exposed SIP
 ; port is found by scanners within minutes and brute-forced for toll fraud —
@@ -18,7 +24,7 @@
 [transport-udp]
 type=transport
 protocol=udp
-bind=127.0.0.1:5060
+bind=${SIP_BIND_ADDRESS}
 ; Production: prefer TLS, and set external_media_address/external_signaling_address
 ; when behind NAT or an SBC.
 ; protocol=tls
@@ -27,30 +33,35 @@ bind=127.0.0.1:5060
 
 
 ; ---------------------------------------------------------------------------
-; Caller softphone (extension 200)
+; Caller softphone (extension 1001) — Linphone in the validated topology.
+;
+; `context` MUST name a context that exists in extensions.conf. A context that
+; is not defined there is not a fallback: Asterisk rejects the call before any
+; dialplan logic runs, so even the 600 proof-of-life test fails. Keep this in
+; step with the context defined in extensions.conf.example.
 ; ---------------------------------------------------------------------------
-[200]
+[1001]
 type=endpoint
-context=clinic-internal
+context=ai-internal
 disallow=all
 ; G.711 only for Phase A: universally supported, low latency, no transcoding
 ; surprises. Add compressed codecs only once the basics are proven.
 allow=ulaw
 allow=alaw
-auth=200-auth
-aors=200
+auth=1001-auth
+aors=1001
 ; Reject calls presenting caller ID we did not authenticate.
 trust_id_inbound=no
 ; No direct media: Asterisk must stay in the audio path for AudioSocket to work.
 direct_media=no
 
-[200-auth]
+[1001-auth]
 type=auth
 auth_type=userpass
-username=200
-password=${SIP_200_PASSWORD}
+username=1001
+password=${SIP_1001_PASSWORD}
 
-[200]
+[1001]
 type=aor
 max_contacts=1
 remove_existing=yes
@@ -61,7 +72,7 @@ remove_existing=yes
 ; ---------------------------------------------------------------------------
 [reception]
 type=endpoint
-context=clinic-internal
+context=ai-internal
 disallow=all
 allow=ulaw
 allow=alaw
@@ -90,7 +101,7 @@ remove_existing=yes
 ; ---------------------------------------------------------------------------
 ;[trunk]
 ;type=endpoint
-;context=from-trunk          ; NOT clinic-internal — inbound must not reach
+;context=from-trunk          ; NOT ai-internal — inbound must not reach
 ;                            ; internal extensions or any outbound route
 ;disallow=all
 ;allow=ulaw

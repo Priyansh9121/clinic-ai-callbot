@@ -12,7 +12,14 @@ pretty=no
 ; Do not allow ARI to originate to arbitrary endpoints from outside the app.
 allowed_origins=
 
-[clinic-ai]
+; The SECTION NAME is the ARI username, and it must equal ASTERISK_ARI_USER in
+; the backend's .env. It is NOT the Stasis application name (ASTERISK_APP_NAME,
+; `clinic-ai`) — those are different things that happen to sit side by side.
+;
+; Getting this wrong produces exactly the same 401 as a wrong password:
+;     {"message": "Authentication required"}
+; so check the section name before assuming the password is at fault.
+[ai-callbot]
 type=user
 read_only=no
 password=${ASTERISK_ARI_PASSWORD}
