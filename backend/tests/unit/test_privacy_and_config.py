@@ -307,3 +307,40 @@ def test_the_database_engine_hides_bound_parameters() -> None:
 
     # AsyncEngine is a wrapper; the flag lives on the engine it wraps.
     assert engine.sync_engine.hide_parameters is True
+
+
+def test_stdlib_tracebacks_are_scrubbed_too() -> None:
+    """structlog's redaction only covers what structlog renders.
+
+    uvicorn logs an unhandled request through the standard library, and an
+    exception's own message is quoted verbatim in the traceback — so a
+    ValueError carrying patient details reached the log through a path no
+    call-site discipline can reach. Synthetic markers only; never real data.
+    """
+    import io
+    import logging
+
+    from app.core.config import Settings
+    from app.core.logging import configure_logging
+
+    configure_logging(Settings(_env_file=None))
+    captured = io.StringIO()
+    handler = logging.StreamHandler(captured)
+    handler.setFormatter(logging.getLogger().handlers[0].formatter)
+    logger = logging.getLogger("uvicorn.error")
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        try:
+            raise ValueError("PATIENT_NAME_SHOULD_NOT_LEAK 0412345678 born 1958-03-14")
+        except ValueError:
+            logger.exception("Exception in ASGI application")
+        written = captured.getvalue()
+    finally:
+        logger.removeHandler(handler)
+        logger.propagate = True
+
+    assert "0412345678" not in written, "a phone number survived in an ASGI traceback"
+    assert "1958-03-14" not in written, "a date of birth survived in an ASGI traceback"
+    # The traceback itself is still useful and must survive.
+    assert "Traceback" in written

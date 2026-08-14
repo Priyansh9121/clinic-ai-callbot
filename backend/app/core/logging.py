@@ -91,6 +91,24 @@ def redact_processor(
     return event_dict
 
 
+class RedactingFormatter(logging.Formatter):
+    """A stdlib formatter that scrubs identifiers out of the finished line.
+
+    structlog's redaction only covers what structlog renders. Anything logged
+    through the standard library — uvicorn's `uvicorn.error`, Starlette's
+    server-error handler, asyncio's "exception was never retrieved" — goes
+    straight to the stream, traceback and all. An exception's own message is
+    quoted verbatim there, so a ValueError carrying a patient's details put
+    them in the log through a path no call-site discipline can reach.
+
+    Scrubbing the formatted string keeps the traceback, which is worth having
+    in development, and removes the phone numbers, emails and dates inside it.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        return scrub_text(super().format(record))
+
+
 def configure_logging(settings: Settings) -> None:
     """Configure structlog + stdlib logging. Safe to call more than once."""
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
@@ -123,6 +141,11 @@ def configure_logging(settings: Settings) -> None:
         cache_logger_on_first_use=True,
     )
     logging.basicConfig(level=level, stream=sys.stderr, format="%(message)s", force=True)
+    # Everything the standard library emits — including tracebacks uvicorn logs
+    # for an unhandled request — goes through this formatter, so it cannot
+    # bypass redaction the way it did before.
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(RedactingFormatter("%(message)s"))
     # uvicorn's access log duplicates our structured request log and can echo
     # query strings; keep it quiet.
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
