@@ -26,7 +26,11 @@ frontend/dist/
 *.local
 
 # --- AI model artefacts (never commit weights) -----------------------------
-models/
+# Anchored to the repository root ON PURPOSE. An unanchored `models/` also
+# matches backend/app/database/models/, which silently excluded the entire
+# SQLAlchemy ORM layer from git — a fresh clone could not import the app at
+# all. Weights live only in ./models (Piper, Whisper, Silero).
+/models/
 *.gguf
 *.onnx
 *.bin
