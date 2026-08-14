@@ -387,3 +387,62 @@ async def test_upcoming_excludes_cancelled_appointments(db, clinic_data, setting
 
     await service.cancel(booked.appointment.id)
     assert await service.upcoming_for_patient(clinic_data.patients["hughes"].id) == []
+
+
+# --- "after 3" is a lower bound, not a period ------------------------------
+async def test_not_before_narrows_the_window_below_a_period(db, clinic_data, settings) -> None:
+    """A period alone is too coarse for "after 3".
+
+    AFTERNOON starts at midday, so a caller who asked for something after 3
+    was offered 12:15. `not_before` was parsed from the utterance and stored on
+    the booking draft, and even counted as a preference change — it simply
+    never reached AvailabilityQuery, so the filter it describes did not exist.
+    """
+    from datetime import time
+
+    service = AvailabilityService(db, settings)
+    day = (utc_now().astimezone(clinic_data.tz) + timedelta(days=3)).date()
+
+    afternoon = await service.search(
+        AvailabilityQuery(clinic_id=clinic_data.clinic.id, day=day, period=DayPeriod.AFTERNOON),
+        clinic_data.tz,
+    )
+    after_three = await service.search(
+        AvailabilityQuery(
+            clinic_id=clinic_data.clinic.id,
+            day=day,
+            period=DayPeriod.AFTERNOON,
+            not_before=time(15, 0),
+        ),
+        clinic_data.tz,
+    )
+
+    assert afternoon, "fixture should provide afternoon availability to narrow"
+    for slot in after_three:
+        local = slot.start_time.astimezone(clinic_data.tz)
+        assert local.hour >= 15, f"offered {local:%H:%M} for a not_before of 15:00"
+    assert len(after_three) < len(afternoon), (
+        "not_before did not narrow the window at all — the filter is not applied"
+    )
+
+
+async def test_not_before_applies_without_a_period(db, clinic_data, settings) -> None:
+    """ "After 3" with no period stated must still bound the day."""
+    from datetime import time
+
+    service = AvailabilityService(db, settings)
+    day = (utc_now().astimezone(clinic_data.tz) + timedelta(days=3)).date()
+
+    slots = await service.search(
+        AvailabilityQuery(
+            clinic_id=clinic_data.clinic.id,
+            day=day,
+            period=DayPeriod.ANY,
+            not_before=time(15, 0),
+        ),
+        clinic_data.tz,
+    )
+
+    assert slots, "fixture should provide late-afternoon availability"
+    for slot in slots:
+        assert slot.start_time.astimezone(clinic_data.tz).hour >= 15

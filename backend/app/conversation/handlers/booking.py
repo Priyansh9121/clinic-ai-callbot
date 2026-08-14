@@ -195,6 +195,10 @@ def _build_query(ctx: FlowContext, *, limit: int) -> AvailabilityQuery:
         practitioner_id=draft.practitioner_id,
         day=draft.preferred_date,
         period=draft.preferred_period,
+        # "after 3" was already parsed and stored, and already counts as a
+        # preference change — it just never reached the query, so the search
+        # widened to the whole afternoon and offered the caller 12:15.
+        not_before=draft.not_before,
         date_from=date_from,
         date_to=date_to,
         limit=limit,

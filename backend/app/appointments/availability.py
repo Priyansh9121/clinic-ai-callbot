@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Select, select
@@ -39,6 +39,10 @@ class AvailabilityQuery:
     location_id: uuid.UUID | None = None
     day: date | None = None
     period: DayPeriod = DayPeriod.ANY
+    #: Earliest acceptable local start time, from "after 3" or "not before 3pm".
+    #: A period alone is too coarse for this: AFTERNOON starts at midday, so
+    #: without it a caller who asked for after 3 is offered 12:15.
+    not_before: time | None = None
     date_from: datetime | None = None
     date_to: datetime | None = None
     limit: int = 20
@@ -58,10 +62,12 @@ class AvailabilityService:
         earliest = utc_now() + timedelta(minutes=self._settings.booking_lead_minutes)
 
         if query.day is not None:
-            if query.period is DayPeriod.ANY:
+            if query.period is DayPeriod.ANY and query.not_before is None:
                 start, end = day_bounds(query.day, tz)
             else:
-                start, end = period_bounds(query.day, query.period, tz)
+                start, end = period_bounds(
+                    query.day, query.period, tz, not_before_local=query.not_before
+                )
         elif query.date_from is not None and query.date_to is not None:
             start, end = query.date_from, query.date_to
         else:
