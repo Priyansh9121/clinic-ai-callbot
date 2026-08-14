@@ -34,10 +34,24 @@ HEADER_BYTES = 3
 #: The length field is 16 bits, so this is a protocol maximum, not a policy.
 MAX_PAYLOAD_BYTES = 0xFFFF
 
-#: Asterisk sends 20 ms of audio per frame. At 8 kHz slin that is 320 bytes;
-#: at 16 kHz slin16, 640. Anything wildly larger is a malformed or hostile
-#: peer rather than a real media frame.
-MAX_REASONABLE_AUDIO_BYTES = 3_840  # 120 ms at 16 kHz, generous
+#: Longest single inbound media payload accepted.
+#:
+#: The previous value (3840) was derived from "Asterisk sends 20 ms per frame,
+#: so 120 ms is generous". That premise is wrong: the protocol says nothing
+#: about packet duration, and the first real call delivered a 7680-byte payload
+#: — 480 ms of 8 kHz slin — which was rejected as malformed and killed the
+#: media. A network packet size and an internal processing frame size are
+#: different things, and this constant is the former.
+#:
+#: Expressed as a duration at the highest byte rate any supported wire format
+#: produces, so it stays meaningful if a format is added: 16 kHz, 16-bit mono
+#: is 32 bytes per millisecond. One second is roughly four times the largest
+#: frame observed in practice and comfortably under the protocol's own 65535
+#: ceiling, while bounding the decoder at 32 KB per connection — 256 KB across
+#: the default eight-connection limit.
+MAX_AUDIO_PAYLOAD_MS = 1_000
+_MAX_BYTES_PER_MS = 32
+MAX_REASONABLE_AUDIO_BYTES = MAX_AUDIO_PAYLOAD_MS * _MAX_BYTES_PER_MS  # 32_000
 
 
 class FrameType(IntEnum):

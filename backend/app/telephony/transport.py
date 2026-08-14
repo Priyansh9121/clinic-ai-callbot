@@ -93,10 +93,15 @@ class TelephonyFormat(StrEnum):
         return 16_000 if self is TelephonyFormat.SLIN16 else 8_000
 
     @property
+    def bytes_per_sample(self) -> int:
+        """1 for the G.711 companded formats, 2 for signed linear."""
+        return 1 if self in (TelephonyFormat.PCMU, TelephonyFormat.PCMA) else 2
+
+    @property
     def frame_bytes(self) -> int:
         """Bytes in one 20 ms frame on the wire."""
         samples = self.sample_rate * FRAME_MS // 1000
-        return samples if self in (TelephonyFormat.PCMU, TelephonyFormat.PCMA) else samples * 2
+        return samples * self.bytes_per_sample
 
     def to_pcm16(self, data: bytes) -> bytes:
         if self is TelephonyFormat.PCMU:
@@ -351,6 +356,17 @@ class AudioSocketChannel:
         return True
 
     def _ingest_audio(self, payload: bytes) -> None:
+        # A 16-bit format cannot deliver half a sample. Checked here rather
+        # than in the decoder, which is format-agnostic: G.711 is one byte per
+        # sample and an odd length is perfectly valid there. Without this the
+        # odd byte reaches numpy, which raises "buffer size must be a multiple
+        # of element size" and ends the call as an unexplained read failure.
+        if self._format.bytes_per_sample == 2 and len(payload) % 2:
+            metrics.increment(M.TELEPHONY_MEDIA_ERROR, labels={"kind": "odd_pcm16"})
+            logger.warning(
+                "telephony.audio_frame_truncated", call_id=self._call_id, bytes=len(payload)
+            )
+            return
         pcm = self._up.convert(self._format.to_pcm16(payload))
         if not pcm:
             return
