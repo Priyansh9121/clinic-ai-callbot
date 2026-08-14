@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     # --- Clinic defaults ---------------------------------------------------
     clinic_timezone: str = "Australia/Melbourne"
     clinic_country: str = "AU"
+    #: JSON file of clinic-approved answers, spoken verbatim. Empty falls back
+    #: to the fictional development set, which is refused in production —
+    #: see app/clinic/factory.py.
+    clinic_knowledge_file: str = ""
     emergency_number: str = "000"
     reception_phone: str = "+61390000000"
 

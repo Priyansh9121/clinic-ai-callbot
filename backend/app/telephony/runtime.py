@@ -23,7 +23,7 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from app.clinic.knowledge_data import build_dev_knowledge
+from app.clinic.factory import build_clinic_knowledge
 from app.conversation.engine import ConversationEngine
 from app.core.config import Settings
 from app.core.logging import get_logger
@@ -51,7 +51,9 @@ class TelephonyVoiceFactory:
         self._settings = settings
         self._analyser = analyser
         self._store = store
-        self._knowledge = build_dev_knowledge()
+        # Telephony is the one path where a placeholder answer reaches a real
+        # patient, so the source is chosen deliberately rather than defaulted.
+        self._knowledge = build_clinic_knowledge(settings)
         self._safety = SafetyEngine()
 
         # Built once, shared across calls.
