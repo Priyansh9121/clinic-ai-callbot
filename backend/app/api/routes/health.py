@@ -76,6 +76,21 @@ async def _llm_component(request: Request, settings: AppSettings) -> HealthCompo
     )
 
 
+#: How long a voice probe result is reused. The probe CONSTRUCTS providers,
+#: and building the VAD loads its model — so an unauthenticated GET /health was
+#: an invitation to load models as fast as requests could be sent. What it
+#: reports changes only when configuration or a model file changes, neither of
+#: which happens between two requests a second apart.
+_VOICE_PROBE_TTL_SECONDS = 30.0
+_voice_probe_cache: tuple[float, list[HealthComponent]] | None = None
+
+
+def reset_voice_probe_cache() -> None:
+    """Drop the cached probe. For tests, and for a deliberate re-check."""
+    global _voice_probe_cache
+    _voice_probe_cache = None
+
+
 async def _voice_components(settings: AppSettings) -> list[HealthComponent]:
     """Per-component voice status: stt, tts, vad, audio_input, audio_output.
 
@@ -85,7 +100,16 @@ async def _voice_components(settings: AppSettings) -> list[HealthComponent]:
     telephony transport in Milestone 4 will not use one.
 
     None of these gate the overall status.
+
+    Cached for _VOICE_PROBE_TTL_SECONDS: this is the expensive half of
+    /health, and it is reached without authentication.
     """
+    global _voice_probe_cache
+
+    now = time.monotonic()
+    if _voice_probe_cache is not None and now - _voice_probe_cache[0] < _VOICE_PROBE_TTL_SECONDS:
+        return _voice_probe_cache[1]
+
     components: list[HealthComponent] = []
 
     for name, provider, probe in (
@@ -127,6 +151,7 @@ async def _voice_components(settings: AppSettings) -> list[HealthComponent]:
             )
 
     components.extend(_audio_device_components(settings))
+    _voice_probe_cache = (now, components)
     return components
 
 
