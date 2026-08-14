@@ -43,7 +43,22 @@ ASK_NEW_PATIENT_MOBILE = "And the best mobile number for you?"
 
 # --- Booking ---------------------------------------------------------------
 ASK_APPOINTMENT_TYPE = "What kind of appointment do you need?"
-ASK_APPOINTMENT_TYPE_OPTIONS = "Is that a standard appointment, a longer one, or telehealth?"
+
+
+def ask_appointment_type(options: list[str]) -> str:
+    """Ask, naming what this clinic actually offers.
+
+    The previous constant hard-coded "a standard appointment, a longer one, or
+    telehealth", which was dead code and would have been wrong for any clinic
+    configured differently.
+    """
+    from app.clinic.directory import join_naturally
+
+    if not options:
+        return ASK_APPOINTMENT_TYPE
+    return f"We offer {join_naturally(options)}. Which would you like?"
+
+
 ASK_PRACTITIONER = "Do you have a preferred doctor?"
 ASK_DATE = "What day suits you?"
 ASK_PERIOD = "Morning or afternoon?"

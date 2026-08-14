@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     #: to the fictional development set, which is refused in production —
     #: see app/clinic/factory.py.
     clinic_knowledge_file: str = ""
+    #: Slug of the appointment type to fall back on when a caller will not or
+    #: cannot choose one. Empty means "no default": the caller is asked again
+    #: and then handed to reception, rather than being silently booked into
+    #: something nobody selected.
+    clinic_default_appointment_type: str = ""
     emergency_number: str = "000"
     reception_phone: str = "+61390000000"
 

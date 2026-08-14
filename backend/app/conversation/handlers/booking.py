@@ -125,18 +125,40 @@ async def _ensure_appointment_type(ctx: FlowContext) -> Reply | None:
         draft.appointment_type_name = chosen.name
         return None
 
+    if len(types) == 1:
+        # Nothing to choose between: asking would be theatre.
+        only = types[0]
+        draft.appointment_type_id = only.id
+        draft.appointment_type_name = only.name
+        return None
+
     if session.state is not ConversationState.APPOINTMENT_TYPE:
         ctx.goto(ConversationState.APPOINTMENT_TYPE)
-        return Reply(text=responses.ASK_APPOINTMENT_TYPE)
+        # Name what this clinic actually offers. Asking "what kind of
+        # appointment do you need?" without saying what the kinds are invites
+        # an answer the vocabulary cannot match, which is how callers ended up
+        # booked into something they never chose.
+        return Reply(text=responses.ask_appointment_type([t.name for t in types]))
 
-    # Asked once and still unresolved — default to the shortest standard type
-    # rather than looping. Reception can adjust it; a stuck caller cannot.
-    chosen = next((t for t in types if t.slug == "standard_gp"), types[0])
-    draft.appointment_type_id = chosen.id
-    draft.appointment_type_name = chosen.name
-    session.clear_retries()
-    logger.info("booking.appointment_type_defaulted", slug=chosen.slug)
-    return None
+    # Asked, and still unresolved. Falling back to a hard-coded "standard_gp"
+    # booked the caller into a type nobody selected and said nothing about it —
+    # and the slug does not necessarily exist for a given clinic. A default is
+    # only used when a clinic has explicitly named one, and the caller is told.
+    configured = ctx.settings.clinic_default_appointment_type.strip()
+    if configured:
+        default_type = next((t for t in types if t.slug == configured), None)
+        if default_type is not None:
+            draft.appointment_type_id = default_type.id
+            draft.appointment_type_name = default_type.name
+            session.clear_retries()
+            logger.info("booking.appointment_type_defaulted", slug=default_type.slug)
+            return None
+        logger.warning("booking.default_appointment_type_missing", slug=configured)
+
+    return ctx.reprompt(
+        responses.ask_appointment_type([t.name for t in types]),
+        responses.DIDNT_CATCH,
+    )
 
 
 async def _ensure_practitioner(ctx: FlowContext) -> Reply | None:

@@ -62,3 +62,47 @@ async def test_asking_about_doctors_then_booking_keeps_context(caller) -> None:
     await caller.say("I'd like to book an appointment")
 
     assert caller.last.state is not ConversationState.HUMAN_TRANSFER, caller.dump()
+
+
+# --- Choosing an appointment type -------------------------------------------
+async def test_the_caller_is_told_what_can_be_booked(caller, clinic_data) -> None:
+    """Asking "what kind?" without saying the kinds is how callers guess wrong."""
+    await caller.say("I'd like to book an appointment")
+    await caller.say("existing patient")
+    await caller.say("Hughes")
+    await caller.say("14 March 1958")
+
+    reply = caller.last.reply
+    assert any(t.name.lower() in reply.lower() for t in clinic_data.types.values()), (
+        f"the configured appointment types were not offered: {reply!r}"
+    )
+
+
+async def test_an_unchosen_type_is_not_silently_defaulted(caller) -> None:
+    """The old behaviour booked standard_gp and said nothing.
+
+    With no CLINIC_DEFAULT_APPOINTMENT_TYPE configured the caller must be asked
+    again rather than committed to something they never selected.
+    """
+    await caller.say("I'd like to book an appointment")
+    await caller.say("existing patient")
+    await caller.say("Hughes")
+    await caller.say("14 March 1958")
+    assert caller.last.state is ConversationState.APPOINTMENT_TYPE, caller.dump()
+
+    await caller.say("mmm I'm not sure")
+
+    session = await caller.session()
+    assert session.booking.appointment_type_id is None, (
+        "an appointment type was chosen for a caller who never picked one"
+    )
+
+
+async def test_an_explicitly_configured_default_is_used_and_is_a_real_slug(
+    caller, settings, clinic_data
+) -> None:
+    """A clinic may configure a fallback; it must name a type that exists."""
+    slugs = {t.slug for t in clinic_data.types.values()}
+    assert settings.clinic_default_appointment_type in ("", *slugs), (
+        "CLINIC_DEFAULT_APPOINTMENT_TYPE names a slug this clinic does not have"
+    )
