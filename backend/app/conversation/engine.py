@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.appointments.availability import AvailabilityService
 from app.appointments.service import AppointmentService
 from app.audit.service import AuditService
+from app.clinic import directory
 from app.clinic.knowledge import ClinicKnowledgeProvider
 from app.clinic.service import ClinicService
 from app.conversation import responses
@@ -356,9 +357,14 @@ class ConversationEngine:
             # off on. Questions are checked first: "are you taking new
             # patients?" is a question about the clinic, not a statement that
             # the caller is one.
-            if (
-                analysis.is_question or not analysis.entities.has_any()
-            ) and await self._knowledge.lookup(analysis.normalised) is not None:
+            # Who works here and what can be booked are answered from the
+            # database, so they will never match the knowledge file and would
+            # otherwise fall through to "assume they want to book".
+            if (analysis.is_question or not analysis.entities.has_any()) and (
+                await self._knowledge.lookup(analysis.normalised) is not None
+                or directory.asks_about_practitioners(analysis.normalised)
+                or directory.asks_about_appointment_types(analysis.normalised)
+            ):
                 self._switch_intent(session, Intent.CLINIC_INFORMATION, 0.6)
                 return None
 

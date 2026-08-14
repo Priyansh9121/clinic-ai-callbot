@@ -17,6 +17,14 @@ logger = get_logger(__name__)
 
 async def handle(ctx: FlowContext) -> Reply:
     question = ctx.analysis.normalised
+
+    # Who works here and what can be booked come from the database, not the
+    # knowledge file: both change without anyone re-approving wording, and the
+    # answer has to agree with what the booking flow offers moments later.
+    directory_reply = await _answer_from_directory(ctx, question)
+    if directory_reply is not None:
+        return directory_reply
+
     match = await ctx.knowledge.lookup(question)
 
     if match is None:
@@ -53,4 +61,50 @@ async def handle(ctx: FlowContext) -> Reply:
     return Reply(
         text=f"{entry.answer} {responses.ANYTHING_ELSE}",
         events=[("TOOL_INVOKED", {"reason": "knowledge_lookup", "category": entry.topic.value})],
+    )
+
+
+async def _answer_from_directory(ctx: FlowContext, question: str) -> Reply | None:
+    """Answer practitioner and appointment-type questions from live rows.
+
+    Returns None when the question is about something else, so the ordinary
+    knowledge lookup runs unchanged.
+    """
+    from app.clinic import directory
+
+    wants_practitioners = directory.asks_about_practitioners(question)
+    wants_types = directory.asks_about_appointment_types(question)
+    if not (wants_practitioners or wants_types):
+        return None
+
+    if wants_practitioners:
+        practitioners = await ctx.clinic_service.list_practitioners(ctx.clinic.id)
+        if not practitioners:
+            # A clinic with no practitioners configured cannot be booked with
+            # either. A person is the honest answer, not "we have none".
+            return ctx.transfer(TransferReason.KNOWLEDGE_GAP)
+
+        named = directory.find_practitioner_by_name(practitioners, question)
+        if named is not None:
+            accepting = (
+                "and is taking new patients"
+                if named.accepts_new_patients
+                else "though they are not taking new patients at the moment"
+            )
+            text = f"Yes, {named.display_name} works here {accepting}."
+        else:
+            text = directory.describe_practitioners(practitioners)
+        category = "practitioners"
+    else:
+        types = await ctx.clinic_service.list_appointment_types(ctx.clinic.id)
+        if not types:
+            return ctx.transfer(TransferReason.KNOWLEDGE_GAP)
+        text = directory.describe_appointment_types(types)
+        category = "appointment_types"
+
+    ctx.goto(ConversationState.CLINIC_INFORMATION)
+    ctx.session.clear_retries()
+    return Reply(
+        text=f"{text} {responses.ANYTHING_ELSE}",
+        events=[("TOOL_INVOKED", {"reason": "directory_lookup", "category": category})],
     )
