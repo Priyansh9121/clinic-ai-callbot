@@ -49,10 +49,30 @@ async def handle(ctx: FlowContext) -> Reply:
     session = ctx.session
     preferences_changed = bool(ctx.changed & PREFERENCE_FIELDS)
 
+    offered_now: list[AvailabilitySlot] | None = None
     if preferences_changed and session.booking.offered_slot_ids:
-        # A correction after options were read out: drop them and search again.
-        session.booking.clear_offers()
-        logger.info("booking.preferences_changed", fields=sorted(ctx.changed))
+        # Repeating one of the times just read out is how most callers choose:
+        # "12 pm", not "the second one". But a bare time also reads as a period
+        # preference — 12 pm is an afternoon — and that lands in
+        # PREFERENCE_FIELDS. Treated as a correction it throws the offers away
+        # and searches again, so the caller is re-offered the very slot they
+        # asked for and can never leave this state.
+        #
+        # What settles it is whether the utterance actually matches something
+        # already on the table, which only the offers can answer. A time that
+        # matches is a choice; one that does not ("actually, make it Friday")
+        # is the correction this branch exists for.
+        offered_now = await _load_offered(ctx)
+        if (
+            session.state is ConversationState.SELECT_SLOT
+            and offered_now
+            and select_from_offers(ctx.analysis, offered_now, ctx.tz) is not None
+        ):
+            preferences_changed = False
+        else:
+            session.booking.clear_offers()
+            offered_now = None
+            logger.info("booking.preferences_changed", fields=sorted(ctx.changed))
 
     if not preferences_changed:
         if session.state is ConversationState.CONFIRM_BOOKING:
@@ -60,7 +80,7 @@ async def handle(ctx: FlowContext) -> Reply:
             if decided is not None:
                 return decided
         elif session.state is ConversationState.SELECT_SLOT:
-            decided = await _handle_selection(ctx)
+            decided = await _handle_selection(ctx, offered=offered_now)
             if decided is not None:
                 return decided
 
@@ -282,9 +302,14 @@ def _requested_phrase(ctx: FlowContext) -> str:
 
 
 # --- Selection and confirmation --------------------------------------------
-async def _handle_selection(ctx: FlowContext) -> Reply | None:
+async def _handle_selection(
+    ctx: FlowContext, *, offered: list[AvailabilitySlot] | None = None
+) -> Reply | None:
     session = ctx.session
-    offered = await _load_offered(ctx)
+    # Reuse the list the caller-intent check already loaded: re-reading it here
+    # would be a second round of database reads on every turn, and a caller is
+    # waiting on the far end of each one.
+    offered = offered if offered is not None else await _load_offered(ctx)
     if not offered:
         session.booking.clear_offers()
         return None  # fall through and search again

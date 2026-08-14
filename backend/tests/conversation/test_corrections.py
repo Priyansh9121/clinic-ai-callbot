@@ -163,6 +163,77 @@ async def test_selecting_by_spoken_time(caller, db, clinic_data) -> None:
     assert session.booking.selected_slot_id == wanted_id
 
 
+async def _offered_slots(caller, db):
+    """Drive a booking to SELECT_SLOT and return the slots actually offered."""
+    from app.database.models.availability import AvailabilitySlot
+
+    await _identified_booker(caller)
+    await caller.say("any doctor")
+    await caller.say("tomorrow")
+    if caller.last.state is ConversationState.PREFERRED_PERIOD:
+        await caller.say("any time")
+
+    session = await caller.session()
+    assert session.state is ConversationState.SELECT_SLOT, (
+        f"expected options to be offered, got {session.state}"
+    )
+    return [await db.get(AvailabilitySlot, sid) for sid in session.booking.offered_slot_ids]
+
+
+async def test_repeating_an_offered_time_selects_it_instead_of_searching_again(
+    caller, db, clinic_data
+) -> None:
+    """The commonest way a caller picks a slot, and it used to be unanswerable.
+
+    A bare clock time is two things at once: a choice between the options just
+    read out, and — since 12 pm is an afternoon — a period preference. Read as
+    a preference it counted as a correction, which discarded the offers and
+    re-ran the search, so the caller was offered the same slot again and could
+    never get past this state however many times they repeated themselves.
+
+    Deliberately picks the LAST slot offered: it is the one most likely to sit
+    in a different period from the caller's current preference, which is what
+    made the old behaviour intermittent and date-dependent rather than obvious.
+    """
+    from app.core.timeutils import speak_time
+
+    offered = await _offered_slots(caller, db)
+    wanted = offered[-1]
+
+    await caller.say(speak_time(wanted.start_time, clinic_data.tz))
+
+    session = await caller.session()
+    assert session.state is ConversationState.CONFIRM_BOOKING, (
+        "repeating an offered time was treated as a new search, not a choice"
+    )
+    assert session.booking.selected_slot_id == wanted.id
+
+
+async def test_a_time_that_was_not_offered_is_still_a_correction(
+    caller, db, clinic_data
+) -> None:
+    """The other half: the fix must not swallow a genuine change of mind.
+
+    "Make it 7 am" when no 7 am was offered is a caller changing what they
+    want, and must still clear the options and search again rather than being
+    mistaken for a selection.
+    """
+    offered = await _offered_slots(caller, db)
+    offered_hours = {s.start_time.astimezone(clinic_data.tz).hour for s in offered}
+    unoffered = next(h for h in range(6, 23) if h not in offered_hours)
+    spoken = f"{unoffered % 12 or 12} {'am' if unoffered < 12 else 'pm'}"
+
+    await caller.say(spoken)
+
+    session = await caller.session()
+    assert session.booking.selected_slot_id is None, (
+        f"{spoken!r} was not among the options, so it must not select one"
+    )
+    assert session.state is not ConversationState.CONFIRM_BOOKING, (
+        "a time that was never offered must not reach confirmation"
+    )
+
+
 async def test_a_correction_marker_alone_does_not_change_state(caller) -> None:
     await _identified_booker(caller)
     await caller.say("Dr Patel")
