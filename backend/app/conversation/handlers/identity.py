@@ -3,10 +3,20 @@ flows.
 
 Identification here establishes ``VerificationLevel.IDENTIFIED`` — surname plus
 date of birth matching exactly one record. That is enough to book, and it is
-what the current milestone ships. Operations that expose *existing* patient
-data (reschedule, cancel) additionally consult
-``app.conversation.policy``, which is where the OTP step raises the bar to
-``VERIFIED`` in Milestone 5.
+what the current milestone ships.
+
+**Reschedule and cancel currently require exactly the same level as booking.**
+All three call ``ensure_identified`` below, and nothing distinguishes them —
+so a caller who can name a surname and a date of birth can change or cancel
+that patient's appointments. The anti-enumeration properties still hold (a
+wrong answer is indistinguishable from a missing record, and
+``expected_patient_id`` stops a guessed appointment id reaching someone
+else's booking), but the bar is knowledge of two facts.
+
+Raising it for operations that expose existing patient data is the OTP work in
+Milestone 5. Until then this is a known limitation rather than a policy —
+earlier versions of this docstring pointed at an ``app.conversation.policy``
+module that has never existed.
 """
 
 from __future__ import annotations

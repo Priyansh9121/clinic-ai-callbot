@@ -86,9 +86,14 @@ class VerificationLevel(StrEnum):
     IDENTIFIED  caller supplied details matching exactly one patient record
     VERIFIED    identity confirmed out-of-band (OTP) — Milestone 5
 
-    ``app.conversation.policy`` maps operations to the level they require, so
-    tightening the requirement later is a one-line configuration change rather
-    than a rewrite of the flows.
+    Every operation currently requires the same level, and one predicate
+    decides it: ``ConversationSession.is_identified`` (app/conversation/
+    session.py), reached through ``ensure_identified`` in
+    app/conversation/handlers/identity.py. There is no per-operation mapping
+    and no policy module — a previous version of this docstring named one that
+    has never existed. When Milestone 5 adds OTP and reschedule/cancel need
+    VERIFIED while booking still needs IDENTIFIED, that is the point at which
+    a mapping earns its place.
     """
 
     NONE = "NONE"
