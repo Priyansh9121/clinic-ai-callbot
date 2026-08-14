@@ -289,8 +289,8 @@ def test_a_configuration_failure_does_not_print_the_value_that_failed() -> None:
     """
     from app.core.config import _configuration_problem
 
-    secret = "sup3rs3cr3t-not-a-real-password"  # noqa: S105
-    with pytest.raises(Exception) as raised:  # noqa: B017 - pydantic's own type
+    secret = "sup3rs3cr3t-not-a-real-password"
+    with pytest.raises(ValueError) as raised:
         Settings(_env_file=None, database_url=f"mysql://u:{secret}@host/db")
 
     message = _configuration_problem(raised.value)
