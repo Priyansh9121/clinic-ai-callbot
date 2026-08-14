@@ -234,3 +234,65 @@ async def test_a_patient_cannot_be_double_booked_at_the_same_time(
     )
     successes = [r for r in results if not isinstance(r, Exception)]
     assert len(successes) == 1
+
+
+# --- What the losing caller actually hears ----------------------------------
+async def test_the_caller_who_loses_the_race_is_offered_alternatives(
+    caller, db, clinic_data, settings
+) -> None:
+    """The DB race is settled correctly; this is about the sentence that follows.
+
+    Slots are offered optimistically and only locked at confirmation, so a slot
+    can be taken between being read out and being accepted. That window is the
+    reason SlotStatus.HELD exists in the schema — and the reason it is not
+    used: the race is already resolved correctly by SELECT FOR UPDATE, so the
+    only thing left to get right is the caller's experience of losing it.
+
+    A technical failure here would be a bad ending to a call that can still
+    succeed.
+    """
+    from app.appointments.service import AppointmentService, BookingRequest
+    from app.conversation.states import ConversationState
+    from app.database.models.enums import BookingSource, SlotStatus
+
+    await caller.say("I'd like to book an appointment")
+    await caller.say("existing patient")
+    await caller.say("Hughes")
+    await caller.say("14 March 1958")
+    await caller.say("standard")
+    await caller.say("any doctor")
+    await caller.say("tomorrow")
+    if caller.last.state is ConversationState.PREFERRED_PERIOD:
+        await caller.say("any time")
+    if caller.last.state is ConversationState.SELECT_SLOT:
+        await caller.say("the first one")
+    assert caller.last.state is ConversationState.CONFIRM_BOOKING, caller.dump()
+
+    session = await caller.session()
+    contested = session.booking.selected_slot_id
+    assert contested is not None
+
+    # Another caller takes it while this one is deciding.
+    other = clinic_data.patients["nguyen"]
+    await AppointmentService(db, settings).book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=other.id,
+            slot_id=contested,
+            source=BookingSource.RECEPTION,
+        )
+    )
+    taken = await db.get(AvailabilitySlot, contested)
+    assert taken.status is SlotStatus.BOOKED
+
+    await caller.say("yes please")
+
+    reply = caller.last.reply.lower()
+    assert "sorry" in reply or "taken" in reply or "no longer" in reply, (
+        f"the caller was not told the time had gone: {caller.last.reply!r}"
+    )
+    assert caller.last.state is not ConversationState.HUMAN_TRANSFER, (
+        "losing a slot race dropped the caller to reception instead of re-offering"
+    )
+    after = await caller.session()
+    assert after.booking.selected_slot_id != contested

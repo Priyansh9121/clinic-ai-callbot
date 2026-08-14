@@ -13,8 +13,26 @@ import sqlalchemy as sa
 
 
 class SlotStatus(StrEnum):
+    """Lifecycle of an availability slot.
+
+    HELD is RESERVED AND DELIBERATELY UNUSED. Nothing sets it, and that is a
+    decision rather than an omission — see docs/architecture/slot-booking.md.
+
+    Briefly: slots are offered optimistically and only locked at confirmation,
+    with `SELECT ... FOR UPDATE` plus partial unique indexes settling any race.
+    A hold would need ownership, a TTL, release on decline, correction, hangup
+    and crash, and a sweep for the rows those miss — machinery to close a
+    seconds-long window that is already closed correctly, and whose only
+    observable consequence is which of two callers is told "that time has just
+    been taken" and offered alternatives.
+
+    The member stays because it is a value in the PostgreSQL `slot_status`
+    enum type: removing it needs a migration and buys nothing.
+    """
+
     AVAILABLE = "AVAILABLE"
-    HELD = "HELD"  # transiently reserved mid-conversation
+    #: Reserved. Never set by the application — see the note above.
+    HELD = "HELD"
     BOOKED = "BOOKED"
     BLOCKED = "BLOCKED"  # leave, admin block, closed period
 

@@ -64,7 +64,10 @@ class AvailabilitySlot(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[SlotStatus] = mapped_column(
         pg_enum(SlotStatus, "slot_status"), nullable=False, default=SlotStatus.AVAILABLE
     )
-    # Set while a slot is HELD so an abandoned conversation cannot strand it.
+    #: Reserved, alongside SlotStatus.HELD, and never written by the
+    #: application. Booking is optimistic-then-locked rather than
+    #: hold-then-confirm; see docs/architecture/slot-booking.md. Kept so the
+    #: column does not need re-adding if that decision is ever revisited.
     held_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     practitioner: Mapped[Practitioner] = relationship(lazy="joined")
