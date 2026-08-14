@@ -21,6 +21,8 @@ Concurrency strategy
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -91,14 +93,48 @@ class AppointmentService:
         self._audit = AuditService(session)
 
     # --- Booking -----------------------------------------------------------
+    @asynccontextmanager
+    async def _atomic(self) -> AsyncIterator[None]:
+        """One appointment mutation: committed together, or undone together.
+
+        The session is shared with the rest of the conversation. A caller who
+        is new to the clinic has a provisional patient record created on it
+        earlier in the same call, and that record is not committed until the
+        turn ends — so rolling the session back wholesale when a booking failed
+        deleted the caller as well as the failed booking. The next turn then
+        could not find the patient it had just created.
+
+        A SAVEPOINT scopes the undo to what this unit wrote. Everything another
+        service already put in the outer transaction survives, and the commit
+        that follows a success still makes the patient and the appointment real
+        together — which is the property that matters: no caller is told an
+        appointment exists before PostgreSQL agrees.
+        """
+        try:
+            async with self._session.begin_nested():
+                yield
+            await self._session.commit()
+        except IntegrityError as exc:
+            # The partial unique indexes are the backstop for a slot that was
+            # taken between the lock and the flush.
+            await self._session.rollback()
+            raise _translate_integrity_error(exc) from exc
+
     async def book(self, request: BookingRequest) -> BookingResult:
         started = utc_now()
         try:
-            result = await self._book_inner(request)
+            async with self._atomic():
+                result = await self._book_inner(request)
         except Exception as exc:
-            await self._session.rollback()
             metrics.increment(M.BOOKING_FAILURE, labels={"reason": type(exc).__name__})
             raise
+        await self._load_related(result.appointment)
+        if not result.replayed:
+            logger.info(
+                "booking.confirmed",
+                appointment_id=str(result.appointment.id),
+                source=request.source.value,
+            )
         metrics.increment(M.BOOKING_SUCCESS, labels={"source": request.source.value})
         metrics.observe(M.BOOKING_LATENCY, (utc_now() - started).total_seconds() * 1000)
         return result
@@ -164,19 +200,8 @@ class AppointmentService:
             },
         )
 
-        # 5. Commit. Only now is the booking real.
-        try:
-            await self._session.commit()
-        except IntegrityError as exc:
-            await self._session.rollback()
-            raise _translate_integrity_error(exc) from exc
-
-        await self._load_related(appointment)
-        logger.info(
-            "booking.confirmed",
-            appointment_id=str(appointment.id),
-            source=request.source.value,
-        )
+        # 5. The commit lives in _atomic(), which owns the transaction
+        #    boundary. Only after it returns is the booking real.
         return BookingResult(appointment=appointment)
 
     def _enforce_booking_rules(self, slot: AvailabilitySlot, *, is_new_patient: bool) -> None:
@@ -212,7 +237,7 @@ class AppointmentService:
         conversation engine passes the verified patient so a caller can never
         cancel someone else's appointment by guessing an id.
         """
-        try:
+        async with self._atomic():
             appointment = await self._lock_appointment(appointment_id)
             if expected_patient_id and appointment.patient_id != expected_patient_id:
                 # Same error as "not found" — no information disclosure.
@@ -244,10 +269,6 @@ class AppointmentService:
                 subject_id=appointment.id,
                 metadata={"source": source.value, "reason_code": "caller_request"},
             )
-            await self._session.commit()
-        except Exception:
-            await self._session.rollback()
-            raise
 
         metrics.increment(M.CANCELLATION, labels={"source": source.value})
         logger.info("booking.cancelled", appointment_id=str(appointment.id))
@@ -274,7 +295,7 @@ class AppointmentService:
             if existing is not None:
                 return existing
 
-        try:
+        async with self._atomic():
             # Lock order: appointment, then slot — matches book()/cancel().
             original = await self._lock_appointment(appointment_id)
             if expected_patient_id and original.patient_id != expected_patient_id:
@@ -338,13 +359,6 @@ class AppointmentService:
                     "start_time": new_slot.start_time.isoformat(),
                 },
             )
-            await self._session.commit()
-        except IntegrityError as exc:
-            await self._session.rollback()
-            raise _translate_integrity_error(exc) from exc
-        except Exception:
-            await self._session.rollback()
-            raise
 
         await self._load_related(replacement)
         metrics.increment(M.RESCHEDULE, labels={"source": source.value})

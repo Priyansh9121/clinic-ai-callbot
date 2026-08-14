@@ -446,3 +446,112 @@ async def test_not_before_applies_without_a_period(db, clinic_data, settings) ->
     assert slots, "fixture should provide late-afternoon availability"
     for slot in slots:
         assert slot.start_time.astimezone(clinic_data.tz).hour >= 15
+
+
+# --- Rollback must not reach beyond the mutation that failed ----------------
+async def _provisional(db, clinic_data, surname: str):
+    from datetime import date as _date
+
+    from app.patients.service import PatientService
+
+    return await PatientService(db).create_provisional(
+        clinic_id=clinic_data.clinic.id,
+        first_name="Rollback",
+        last_name=surname,
+        date_of_birth=_date(1980, 1, 1),
+        mobile=None,
+    )
+
+
+async def test_a_failed_booking_does_not_delete_the_caller(db, clinic_data, settings) -> None:
+    """The caller is created, then the booking fails, and the caller vanished.
+
+    A first-time caller gets a provisional patient row part-way through the
+    call, on the same session everything else uses. `book()` rolled that
+    session back on any failure, which undid the patient too — so the next
+    turn could not find the record it had just created, and the caller was
+    asked for their details again or transferred.
+
+    The undo must reach only as far as the mutation that failed.
+    """
+    from app.patients.service import PatientService
+
+    patient = await _provisional(db, clinic_data, "Booking")
+    patient_id = patient.id
+    service = AppointmentService(db, settings)
+
+    with pytest.raises(SlotNotFoundError):
+        await service.book(
+            BookingRequest(
+                clinic_id=clinic_data.clinic.id,
+                patient_id=patient_id,
+                slot_id=uuid.uuid4(),  # fails after the patient exists
+                source=BookingSource.AI_CALLBOT,
+                is_new_patient=True,
+            )
+        )
+
+    assert await PatientService(db).get(patient_id) is not None, (
+        "an unrelated booking failure destroyed the provisional patient"
+    )
+
+
+async def test_a_failed_cancellation_does_not_delete_the_caller(db, clinic_data, settings) -> None:
+    from app.patients.service import PatientService
+
+    patient = await _provisional(db, clinic_data, "Cancel")
+    patient_id = patient.id
+    service = AppointmentService(db, settings)
+
+    with pytest.raises(AppointmentNotFoundError):
+        await service.cancel(uuid.uuid4())
+
+    assert await PatientService(db).get(patient_id) is not None
+
+
+async def test_a_failed_reschedule_does_not_delete_the_caller(db, clinic_data, settings) -> None:
+    from app.patients.service import PatientService
+
+    patient = await _provisional(db, clinic_data, "Reschedule")
+    patient_id = patient.id
+    service = AppointmentService(db, settings)
+
+    with pytest.raises(AppointmentNotFoundError):
+        await service.reschedule(uuid.uuid4(), uuid.uuid4())
+
+    assert await PatientService(db).get(patient_id) is not None
+
+
+async def test_a_failed_booking_leaves_no_half_written_appointment(
+    db, clinic_data, settings
+) -> None:
+    """The other half of the same boundary: the failure must undo its own work.
+
+    Scoping the rollback to a savepoint must not turn a failure into a
+    partially-applied booking — the slot stays available and no appointment row
+    survives.
+    """
+    slot = await _first_available(db, clinic_data, settings)
+    patient = await _provisional(db, clinic_data, "Partial")
+    service = AppointmentService(db, settings)
+    before = (await db.execute(select(func.count()).select_from(Appointment))).scalar_one()
+
+    # Inside the booking lead time, so _enforce_booking_rules rejects it after
+    # the slot has already been locked and read.
+    slot.start_time = utc_now() + timedelta(minutes=1)
+    await db.flush()
+
+    with pytest.raises(BookingRuleError):
+        await service.book(
+            BookingRequest(
+                clinic_id=clinic_data.clinic.id,
+                patient_id=patient.id,
+                slot_id=slot.id,
+                source=BookingSource.AI_CALLBOT,
+            )
+        )
+
+    after = (await db.execute(select(func.count()).select_from(Appointment))).scalar_one()
+    assert after == before, "a failed booking left an appointment row behind"
+    refreshed = await db.get(AvailabilitySlot, slot.id)
+    assert refreshed.status is SlotStatus.AVAILABLE, "a failed booking consumed the slot"
