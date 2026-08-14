@@ -114,17 +114,35 @@ class AudioSocketServer:
                 await writer.wait_closed()
             return
 
+        # Construct BEFORE reserving the slot. The counter was incremented
+        # first and the constructor sat outside the try below, so anything it
+        # raised leaked a media slot permanently — and after max_connections
+        # such failures every subsequent call is refused until the process
+        # restarts, with the port still open and still accepting.
+        try:
+            channel = AudioSocketChannel(
+                reader,
+                writer,
+                call_id="pending",
+                wire_format=self._format,
+                resample_quality=self._resample_quality,
+            )
+        except Exception as exc:
+            # Nothing has been reserved yet, so there is nothing to release —
+            # but the socket is open and the exception would otherwise escape
+            # into the accept task, where asyncio only reports it as an
+            # unretrieved exception long afterwards.
+            metrics.increment(M.TELEPHONY_MEDIA_ERROR, labels={"kind": "channel_setup"})
+            logger.error("telephony.media_channel_setup_failed", error=type(exc).__name__)
+            with contextlib.suppress(Exception):
+                writer.close()
+                await writer.wait_closed()
+            return
+
         task = asyncio.current_task()
         if task is not None:
             self._connections.add(task)
         self._active += 1
-        channel = AudioSocketChannel(
-            reader,
-            writer,
-            call_id="pending",
-            wire_format=self._format,
-            resample_quality=self._resample_quality,
-        )
         try:
             await channel.start()
             call_uuid = await channel.wait_for_uuid(limit_seconds=UUID_TIMEOUT_SECONDS)

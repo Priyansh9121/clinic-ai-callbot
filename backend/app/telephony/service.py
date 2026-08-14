@@ -240,6 +240,11 @@ class TelephonyService:
             self._controllers.pop(channel_id, None)
             with contextlib.suppress(AriError):
                 await self._ari.hangup(channel_id)
+            # The bridge may already exist: create_bridge is the second step,
+            # so a failure in add_to_bridge or originate leaves one behind.
+            # Only the success path destroyed it, so every failed setup
+            # orphaned a bridge in Asterisk until the PBX restarted.
+            await self._destroy_bridge(bridge_id)
             return
 
         self._spawn(self._await_media(pending))
@@ -266,6 +271,7 @@ class TelephonyService:
             pending.finished.set()
             with contextlib.suppress(Exception):
                 await pending.controller.hangup(HangupCause.FAILURE)
+            await self._destroy_bridge(pending.bridge_id)
             return
 
         session = CallSession(
@@ -281,6 +287,8 @@ class TelephonyService:
             pending.finished.set()
             with contextlib.suppress(Exception):
                 await pending.controller.hangup(HangupCause.FAILURE)
+            self._pending.pop(pending.media_uuid, None)
+            await self._destroy_bridge(pending.bridge_id)
             return
         try:
             await session.run()
@@ -295,8 +303,18 @@ class TelephonyService:
                     await release(session.voice)
             await self._manager.release(pending.call_id)
             self._pending.pop(pending.media_uuid, None)
-            with contextlib.suppress(AriError):
-                await self._ari.destroy_bridge(pending.bridge_id)
+            await self._destroy_bridge(pending.bridge_id)
+
+    async def _destroy_bridge(self, bridge_id: str) -> None:
+        """Release a bridge on every path that created one.
+
+        Only the success path used to do this, so a setup failure, a media
+        socket that never arrived, or a call refused at capacity each left a
+        bridge in Asterisk until the PBX was restarted. Destroying one that was
+        never created is harmless and suppressed.
+        """
+        with contextlib.suppress(AriError):
+            await self._ari.destroy_bridge(bridge_id)
 
     async def _attach_media(self, channel: AudioSocketChannel, media_uuid: str | None) -> None:
         """Media server callback: match this socket to the call that owns it."""
