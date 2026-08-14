@@ -97,6 +97,7 @@ def build_telephony_service(
         voice_factory=voice_factory,
         manager=manager,
         hangup_drain_ms=settings.telephony_hangup_drain_ms,
+        max_call_seconds=settings.telephony_max_call_seconds,
         wire_format=wire_format(settings),
         resample_quality=settings.telephony_resample_quality,
     )

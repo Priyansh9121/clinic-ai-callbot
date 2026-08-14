@@ -40,6 +40,7 @@ from app.telephony.asterisk_control import AsteriskCallController
 from app.telephony.control import HangupCause
 from app.telephony.destinations import DestinationRegistry
 from app.telephony.manager import (
+    DEFAULT_MAX_CALL_SECONDS,
     CallManager,
     CallSession,
     CapacityPolicy,
@@ -91,6 +92,7 @@ class TelephonyService:
         manager: CallManager | None = None,
         server: AudioSocketServer | None = None,
         hangup_drain_ms: int = 250,
+        max_call_seconds: int = DEFAULT_MAX_CALL_SECONDS,
         media_advertise_host: str | None = None,
         wire_format: TelephonyFormat = TelephonyFormat.SLIN,
         resample_quality: str = "HQ",
@@ -107,6 +109,7 @@ class TelephonyService:
         self._voice_factory = voice_factory
         self._manager = manager or CallManager()
         self._hangup_drain_ms = hangup_drain_ms
+        self._max_call_seconds = max_call_seconds
 
         self._server = server or AudioSocketServer(
             self._attach_media,
@@ -272,6 +275,7 @@ class TelephonyService:
             voice_session_factory=self._voice_factory,
             destinations=self._destinations,
             hangup_drain_ms=self._hangup_drain_ms,
+            max_call_seconds=self._max_call_seconds,
         )
         if not await self._manager.register(session):
             pending.finished.set()

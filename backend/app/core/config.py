@@ -257,6 +257,10 @@ class Settings(BaseSettings):
     telephony_capacity_policy: Literal["reject", "transfer_reception"] = "reject"
     #: Drain before releasing the channel, so a goodbye is not clipped.
     telephony_hangup_drain_ms: int = 250
+    #: Hard ceiling on a single call, in seconds. A wedged turn or a caller who
+    #: walked away otherwise holds a media slot, a database session and a slice
+    #: of the concurrency cap until the process restarts.
+    telephony_max_call_seconds: int = 600
     #: Salt for the caller-number fingerprint. An unsalted hash of a 10-digit
     #: number is a lookup table, not an anonymisation. Set per deployment.
     telephony_caller_salt: SecretStr = SecretStr("change-me-per-deployment")

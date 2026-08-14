@@ -46,6 +46,13 @@ logger = get_logger(__name__)
 #: hangup; with too much of it, callers sit on a dead line.
 DEFAULT_HANGUP_DRAIN_MS = 250
 
+#: Hard ceiling on one call. A receptionist call that has not finished in ten
+#: minutes is not going to: the caller has walked away, the line is holding
+#: open on silence, or a turn is wedged. Every one of those holds a media slot,
+#: a database session and a slice of the concurrency cap until the process
+#: restarts, so the call is ended rather than left to run forever.
+DEFAULT_MAX_CALL_SECONDS = 600
+
 #: A caller who hangs up must not leave inference running. This bounds how long
 #: teardown waits for cancelled work to unwind before giving up on it.
 TEARDOWN_TIMEOUT_SECONDS = 5.0
@@ -102,12 +109,14 @@ class CallSession:
         voice_session_factory: Callable[[AudioSocketInput, AudioSocketOutput, Callable], object],
         destinations: DestinationRegistry,
         hangup_drain_ms: int = DEFAULT_HANGUP_DRAIN_MS,
+        max_call_seconds: int = DEFAULT_MAX_CALL_SECONDS,
     ) -> None:
         self._call_id = call_id
         self._controller = controller
         self._channel = channel
         self._destinations = destinations
         self._hangup_drain_ms = hangup_drain_ms
+        self._max_call_seconds = max_call_seconds
 
         self._state = CallState.RINGING
         self._stats = CallStats(call_id=call_id)
@@ -116,6 +125,7 @@ class CallSession:
         self._transfer_target = None
         self._dtmf: list[str] = []
         self._ended = asyncio.Event()
+        self._finished = False
 
     # --- Introspection -----------------------------------------------------
     @property
@@ -175,7 +185,22 @@ class CallSession:
 
             self._voice = self._voice_factory(audio_in, audio_out, self._on_voice_event)
             self._move(CallState.ACTIVE)
-            await self._voice.run()
+            try:
+                async with asyncio.timeout(self._max_call_seconds):
+                    await self._voice.run()
+            except TimeoutError:
+                # Cancels the conversation where it stands and falls through to
+                # finish(), which is the same teardown a caller hangup takes —
+                # channel released, media closed, capacity returned, database
+                # session handed back. Nothing here is special-cased, so the
+                # cleanup cannot drift out of step with the ordinary path.
+                metrics.increment(M.TELEPHONY_CALLS_FAILED, labels={"stage": "duration_limit"})
+                logger.warning(
+                    "telephony.call_duration_limit",
+                    call_id=self._call_id,
+                    limit_seconds=self._max_call_seconds,
+                )
+                self._move(CallState.FAILED)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -256,10 +281,26 @@ class CallSession:
             asyncio.get_running_loop().create_task(_suppress(self._voice.stop()))
 
     async def finish(self) -> None:
-        """Release every resource this call held. Runs exactly once."""
-        if self._state in (CallState.ENDED, CallState.FAILED):
+        """Release every resource this call held. Runs exactly once.
+
+        Guarded on having *run*, not on the call being in a terminal state.
+        Those are different questions, and conflating them meant a call that
+        reached FAILED never released anything: run()'s error path moves to
+        FAILED and then calls finish() from its finally block, which saw a
+        terminal state and returned immediately. The channel was never hung up,
+        the media socket never closed, and the capacity slot never returned —
+        on every failed call, which are exactly the calls that most need
+        cleaning up.
+        """
+        if self._finished:
             return
-        if self._state is not CallState.TRANSFERRING:
+        self._finished = True
+
+        # A call that failed stays FAILED: it did not complete, and the metrics
+        # must not say it did. Only the drain is skipped — there is no last
+        # audio worth waiting for when the conversation is already gone.
+        failed = self._state is CallState.FAILED
+        if not failed and self._state is not CallState.TRANSFERRING:
             self._move(CallState.HANGING_UP)
             # Let the last audio clear Asterisk before the channel goes.
             if self._hangup_drain_ms > 0 and self._channel.is_running:
@@ -276,9 +317,10 @@ class CallSession:
             await asyncio.wait_for(self._channel.close(), timeout=TEARDOWN_TIMEOUT_SECONDS)
 
         self._stats.ended_at = time.perf_counter()
-        self._move(CallState.ENDED)
+        if not failed:
+            self._move(CallState.ENDED)
+            metrics.increment(M.TELEPHONY_CALLS_COMPLETED)
         self._ended.set()
-        metrics.increment(M.TELEPHONY_CALLS_COMPLETED)
         metrics.observe(M.TELEPHONY_CALL_DURATION, self._stats.duration_seconds * 1000)
         logger.info(
             "telephony.call_ended",

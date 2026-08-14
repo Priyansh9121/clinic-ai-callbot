@@ -33,7 +33,7 @@ from app.telephony.destinations import (
 )
 from app.telephony.manager import CallManager, CallSession, CapacityPolicy
 from app.telephony.metadata import CallerIdentity, normalise_number
-from app.telephony.states import CallState
+from app.telephony.states import TERMINAL_STATES, CallState
 from app.telephony.transport import AudioSocketInput, AudioSocketOutput
 from app.voice.endpointing import EndpointConfig
 from app.voice.session import VoiceSession, VoiceSessionConfig
@@ -795,3 +795,88 @@ def test_the_redaction_processor_drops_caller_identifiers() -> None:
     assert cleaned["caller_number"] == "[redacted]"
     assert cleaned["caller_name"] == "[redacted]"
     assert cleaned["call_id"] == "4f82abcd", "the opaque correlation id must survive"
+
+
+# --- A call must not run forever -------------------------------------------
+async def test_a_call_that_never_ends_is_cut_off_and_cleaned_up(destinations) -> None:
+    """A wedged turn or a caller who walked away holds real resources.
+
+    Without a ceiling the media slot, the database session and a slice of the
+    concurrency cap are held until the process restarts. The limit takes the
+    ordinary teardown path so cleanup cannot drift out of step with it.
+    """
+    pbx = FakeAsterisk()
+    await pbx.start()
+    try:
+        channel = await pbx.connect()
+        controller = FakeCallController()
+
+        def never_finishes(audio_in, audio_out, on_event):
+            class Stuck:
+                async def run(self) -> None:
+                    await asyncio.Event().wait()  # a turn that never completes
+
+                async def stop(self) -> None:
+                    return None
+
+            return Stuck()
+
+        session = CallSession(
+            call_id="call-duration",
+            controller=controller,
+            channel=channel,
+            voice_session_factory=never_finishes,
+            destinations=destinations,
+            max_call_seconds=0,  # fires immediately
+        )
+
+        await asyncio.wait_for(session.run(), timeout=5.0)
+
+        assert controller.answered, "the caller was answered before the limit fired"
+        # FAILED rather than ENDED, and deliberately: a call cut off at the
+        # ceiling did not finish, and the metrics should not say it did.
+        assert session.state is CallState.FAILED, f"left in {session.state}"
+        assert session.state in TERMINAL_STATES, "the call was left running"
+        assert controller.hangups, "the channel was never released"
+    finally:
+        await pbx.stop()
+
+
+async def test_the_duration_limit_does_not_fire_when_the_caller_hangs_up_first(
+    destinations,
+) -> None:
+    """The ordinary path must not be reported as a timeout."""
+    pbx = FakeAsterisk()
+    await pbx.start()
+    try:
+        channel = await pbx.connect()
+        controller = FakeCallController()
+        finished = asyncio.Event()
+
+        def ends_on_hangup(audio_in, audio_out, on_event):
+            class Short:
+                async def run(self) -> None:
+                    await finished.wait()
+
+                async def stop(self) -> None:
+                    finished.set()
+
+            return Short()
+
+        session = CallSession(
+            call_id="call-early-hangup",
+            controller=controller,
+            channel=channel,
+            voice_session_factory=ends_on_hangup,
+            destinations=destinations,
+            max_call_seconds=600,
+        )
+        task = asyncio.create_task(session.run())
+        await asyncio.sleep(0.05)
+        controller.caller_hangs_up()
+        finished.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+        assert session.state is CallState.ENDED
+    finally:
+        await pbx.stop()
