@@ -106,7 +106,15 @@ async def main() -> int:
 
     print(f"\n{BOLD}Media transport (AudioSocket){RESET}")
     fmt = wire_format(settings)
-    print(f"  {'listen':<22} {settings.telephony_media_host}:{settings.telephony_media_port}")
+    print(f"  {'bind (listen)':<22} {settings.telephony_media_host}:{settings.telephony_media_port}")
+    advertised = f"{settings.media_advertise_host}:{settings.telephony_media_port}"
+    routable = settings.media_advertise_is_routable
+    print(f"  {'advertised to PBX':<22} {advertised}  {mark(routable)}")
+    if not routable:
+        print(f"  {RED}Asterisk cannot dial that. Set TELEPHONY_MEDIA_ADVERTISE_HOST to this"
+              f" host's address on the PBX network.{RESET}")
+    elif settings.media_advertise_host in ("127.0.0.1", "localhost", "::1"):
+        print(f"  {DIM}loopback: correct only when Asterisk runs on this machine{RESET}")
     print(f"  {'wire format':<22} {fmt.value}  {DIM}{fmt.sample_rate} Hz, "
           f"{fmt.frame_bytes} bytes / 20 ms frame{RESET}")
     resampling = "none (matches canonical)" if fmt.sample_rate == 16_000 else (

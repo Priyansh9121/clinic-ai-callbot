@@ -11,31 +11,45 @@ softphone (ext 200) ──SIP──► Asterisk ──ARI──► clinic AI (co
                              └──transfer──► reception (ext 100)
 ```
 
-## Asterisk is not installed on this development machine
+## Validated topology
 
-The implementation was written and tested without it, deliberately.
+Asterisk runs in a UTM Ubuntu VM; the clinic AI runs on the Mac. Proven working
+in this environment:
 
-`brew` no longer carries an `asterisk` formula and macOS is not a supported
-Asterisk platform, so it belongs in a Linux VM or on its own host.
+```
+Linphone (ext 1001) ──SIP/UDP 5060──► Asterisk 20.6.0  (VM, 192.168.65.2)
+                                          │
+   ext 600  Playback(hello-world) ────────┤   proof-of-life, no AI
+                                          │
+   ext 700  Stasis(clinic-ai) ────────────┤
+                                          │
+   Mac connects out ──► ARI on the VM ─────┤   192.168.65.2:8088
+   VM connects back ──► AudioSocket ───────┘   192.168.65.1:8090 (the Mac)
+```
 
-**Re-checked when closing the milestone, and the answer did not change.** There
-*is* a suitable home — an existing UTM Ubuntu 22.04 VM (4 GB RAM, 26 GB) — but
-at the time of checking the host had **7058 MB of its 8192 MB swap already in
-use and 5.9 GB free on a 98%-full disk**, with Ollama, Whisper, PostgreSQL and
-Redis resident. Starting a 4 GB VM there would force macOS to grow swap on a
-nearly-full volume, putting the development PostgreSQL data in `.devdata/` at
-risk. That is exactly the destabilisation this section exists to avoid, so the
-VM was left stopped and the live acceptance was not attempted here.
+| | |
+|---|---|
+| Asterisk | 20.6.0, Ubuntu ARM64, PJSIP + ARI + AudioSocket present |
+| VM address | `192.168.65.2` |
+| Mac address, as the VM sees it | `192.168.65.1` (UTM `bridge100`) |
+| Softphone | Linphone, extension `1001` |
+| Audio-path test | extension `600` |
+| Clinic AI | extension `700` → `Stasis(clinic-ai)` |
+| Stasis application | `clinic-ai` — must match `ASTERISK_APP_NAME` |
 
-So: **the media path, call lifecycle, transfer logic, isolation and security
-properties are covered by automated tests that need no PBX**, the media tests
-run over real loopback TCP sockets speaking the real AudioSocket wire protocol,
-and the ARI event orderings are driven through a control-plane double. What has
-*not* been executed is Asterisk itself.
+### The two media addresses
 
-The application is host-independent: it connects to ARI over HTTP and accepts
-AudioSocket over TCP, so Asterisk can live in a VM, a container, or on another
-machine on your desk.
+The single most common way to get a connected call with no audio:
+
+| Setting | Value here | Means |
+|---|---|---|
+| `TELEPHONY_MEDIA_HOST` | `0.0.0.0` | where the Mac **binds** its listener |
+| `TELEPHONY_MEDIA_ADVERTISE_HOST` | `192.168.65.1` | what Asterisk is **told to dial** |
+
+`127.0.0.1` is wrong for the advertised address — inside the VM that is the VM
+itself, so Asterisk dials itself, finds nothing, and the caller hears silence.
+`0.0.0.0` is not a destination at all; the application refuses to start with a
+wildcard bind and no advertised address rather than failing at call time.
 
 ## Getting an Asterisk
 
@@ -143,6 +157,120 @@ Register a second client as `reception` to receive transfers.
 
 These are development values. Change them in `extensions.conf` and `.env`
 together.
+
+---
+
+# RUNBOOK — bringing the local SIP stack up
+
+Order matters: each step proves the layer beneath it, so a failure tells you
+where to look instead of leaving you guessing.
+
+### 1. Start the VM and confirm Asterisk
+
+```bash
+/Applications/UTM.app/Contents/MacOS/utmctl start "AIIL UTM Ubuntu 22.04"
+# in the VM:
+sudo systemctl status asterisk
+asterisk -V                                     # expect 18+ (validated on 20.6.0)
+sudo asterisk -rx "module show like audiosocket"
+sudo asterisk -rx "module show like res_ari"
+sudo asterisk -rx "pjsip show endpoints"
+```
+
+`chan_audiosocket` matters as much as `res_audiosocket`: without the channel
+driver, ARI cannot originate the media leg and every call connects to silence.
+
+### 2. Start the Mac dependencies
+
+```bash
+./scripts/dev_services.sh start                 # PostgreSQL 5433, Redis 6380
+ollama list                                     # the configured model must be present
+```
+
+### 3. Check configuration before starting anything
+
+```bash
+uv run python scripts/telephony_status.py
+```
+
+Expect `enabled True`, `fully configured ok`, `reachable ok`, and an
+`advertised to PBX` address that is **not** loopback. If `reachable` is `down`,
+separate network from credentials before touching code:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://<VM_IP>:8088/ari/asterisk/info
+#   401 → Asterisk is up and reachable; the ARI credential is wrong
+#   000 → nothing listening / not routable — VM networking or http.conf
+```
+
+### 4. Start the backend
+
+Telephony starts inside the FastAPI lifespan — there is no separate daemon.
+
+```bash
+cd backend && uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+Look for `telephony.started` and `telephony.media_listening` in the log, then:
+
+```bash
+curl -s localhost:8000/health | python3 -m json.tool | grep -A2 telephony
+```
+
+### 5. Confirm the PBX can see the application
+
+```bash
+# in the VM — the Stasis app only appears once the backend's WebSocket connects
+sudo asterisk -rx "ari show apps"               # expect: clinic-ai
+sudo asterisk -rx "dialplan show ai-internal"   # expect: Stasis(clinic-ai) on 700
+```
+
+### 6. Confirm the media path
+
+```bash
+# on the Mac
+lsof -nP -iTCP:8090 -sTCP:LISTEN                # expect a python process
+# in the VM — must reach the Mac, not the VM itself
+nc -vz 192.168.65.1 8090
+```
+
+If `nc` fails, the cause is the macOS firewall or the bind address, not the
+dialplan. Allow the specific binary rather than disabling the firewall:
+
+```bash
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$(which python3)"
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp "$(which python3)"
+```
+
+### 7. Call, in this order
+
+```
+600   audio path only — if this fails, stop; the problem is SIP/RTP/codecs
+700   the clinic AI   — greeting, then conversation
+```
+
+### 8. Watching a call
+
+```bash
+# VM
+sudo asterisk -rvvv                             # live console
+sudo asterisk -rx "core show channels"
+sudo asterisk -rx "ari show apps"
+
+# Mac — timings and lifecycle only; no transcripts or caller numbers are logged
+tail -f <backend log>  | grep telephony
+```
+
+### 9. Shutdown order
+
+Backend first, so calls end cleanly and bridges are destroyed, then services,
+then the VM.
+
+```bash
+# Ctrl-C the backend
+./scripts/dev_services.sh stop
+/Applications/UTM.app/Contents/MacOS/utmctl stop "AIIL UTM Ubuntu 22.04"
+```
 
 ---
 

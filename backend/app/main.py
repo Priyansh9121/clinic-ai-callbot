@@ -26,6 +26,7 @@ from app.llm.factory import build_llm_provider, build_message_analyser
 from app.safety.engine import SafetyEngine
 from app.security.headers import RequestContextMiddleware, SecurityHeadersMiddleware
 from app.security.ratelimit import RateLimitMiddleware
+from app.telephony.runtime import start_telephony, stop_telephony
 
 logger = get_logger(__name__)
 
@@ -64,9 +65,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if warmup is not None:
             app.state.llm_warmup_task = asyncio.create_task(warmup())
 
+    # Telephony last, because it depends on the analyser and session store
+    # above. It declines rather than raises when unconfigured or unreachable:
+    # a PBX problem must not stop the clinic answering text and local voice,
+    # and the dialplan's health-check failover routes callers to reception
+    # while /health reports telephony down.
+    app.state.telephony = await start_telephony(app.state, settings)
+
     try:
         yield
     finally:
+        await stop_telephony(getattr(app.state, "telephony", None))
         task = getattr(app.state, "llm_warmup_task", None)
         if task is not None and not task.done():
             task.cancel()

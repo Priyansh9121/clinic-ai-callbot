@@ -48,7 +48,7 @@ from app.telephony.manager import (
     new_call_id,
 )
 from app.telephony.server import AudioSocketServer
-from app.telephony.transport import AudioSocketChannel
+from app.telephony.transport import AudioSocketChannel, TelephonyFormat
 
 logger = get_logger(__name__)
 
@@ -91,9 +91,17 @@ class TelephonyService:
         manager: CallManager | None = None,
         server: AudioSocketServer | None = None,
         hangup_drain_ms: int = 250,
+        media_advertise_host: str | None = None,
+        wire_format: TelephonyFormat = TelephonyFormat.SLIN,
+        resample_quality: str = "HQ",
     ) -> None:
         self._ari = ari
         self._media_host = media_host
+        # What Asterisk is told to dial. Distinct from the bind address: with
+        # the PBX in a VM we bind 0.0.0.0 but must advertise the host's address
+        # on that network. Defaults to the bind host for an all-on-one-host
+        # setup, which is the only case where they are legitimately the same.
+        self._media_advertise_host = media_advertise_host or media_host
         self._media_port = media_port
         self._destinations = destinations
         self._voice_factory = voice_factory
@@ -101,7 +109,11 @@ class TelephonyService:
         self._hangup_drain_ms = hangup_drain_ms
 
         self._server = server or AudioSocketServer(
-            self._attach_media, host=media_host, port=media_port
+            self._attach_media,
+            host=media_host,
+            port=media_port,
+            wire_format=wire_format,
+            resample_quality=resample_quality,
         )
         # Keyed by media UUID: the only thing linking a socket to a call.
         self._pending: dict[str, _PendingCall] = {}
@@ -213,7 +225,7 @@ class TelephonyService:
             # Asterisk can deliver the event first — leaving the media channel
             # out of the bridge and the caller listening to silence.
             await self._ari.originate_media_channel(
-                host=self._media_host,
+                host=self._media_advertise_host,
                 port=self.media_port,
                 media_uuid=media_uuid,
                 app_args=f"media,{media_uuid}",
@@ -270,6 +282,13 @@ class TelephonyService:
             await session.run()
         finally:
             pending.finished.set()
+            # Hand back whatever the voice factory allocated for this call —
+            # its database session, in the application wiring. Optional so a
+            # plain callable factory (the tests use one) still works.
+            release = getattr(self._voice_factory, "release", None)
+            if release is not None:
+                with contextlib.suppress(Exception):
+                    await release(session.voice)
             await self._manager.release(pending.call_id)
             self._pending.pop(pending.media_uuid, None)
             with contextlib.suppress(AriError):

@@ -193,8 +193,18 @@ class Settings(BaseSettings):
     # AudioSocket media server. Loopback by default: the protocol carries no
     # credential, so anything that can reach this port can inject audio into a
     # live call. Across hosts it belongs on a private media network.
+    #
+    # Two addresses, because they answer different questions. Asterisk connects
+    # *to* us, so when it runs in a VM or on another host the socket must bind
+    # somewhere reachable (0.0.0.0) while Asterisk must be told a routable
+    # address (the host's IP on that network). Telling Asterisk "0.0.0.0" is
+    # not a destination, and "127.0.0.1" means the PBX itself — which is how a
+    # call connects and then hears nothing at all.
     telephony_media_host: str = "127.0.0.1"
     telephony_media_port: int = 8090
+    #: Address Asterisk dials for media. Empty means "same as the bind host",
+    #: which is correct only when the PBX and this process share a host.
+    telephony_media_advertise_host: str = ""
     #: Wire format of the media leg: slin | slin16 | pcmu | pcma. slin16 avoids
     #: resampling entirely where the dialplan can raise the channel format.
     telephony_wire_format: Literal["slin", "slin16", "pcmu", "pcma"] = "slin"
@@ -264,6 +274,23 @@ class Settings(BaseSettings):
             and self.tts_provider != "none"
             and self.vad_provider != "none"
         )
+
+    @property
+    def media_advertise_host(self) -> str:
+        """The address Asterisk should connect to for media.
+
+        Falls back to the bind host, which is right for an all-on-one-host
+        setup. A wildcard bind has no such fallback: there is no way to guess
+        which interface the PBX can reach, so it must be configured.
+        """
+        if self.telephony_media_advertise_host:
+            return self.telephony_media_advertise_host
+        return self.telephony_media_host
+
+    @property
+    def media_advertise_is_routable(self) -> bool:
+        """Whether the advertised address is something Asterisk can dial."""
+        return self.media_advertise_host not in ("0.0.0.0", "", "::", "*")  # noqa: S104
 
     @property
     def telephony_configured(self) -> bool:

@@ -223,3 +223,65 @@ async def test_a_second_call_at_capacity_is_refused_without_answering(
 
     assert ari.answered == [], "a call was answered while at capacity"
     assert "caller-2" in ari.hangups
+
+
+# --- Media address: bind vs advertised --------------------------------------
+def _telephony_settings(**overrides):
+    """Settings with telephony fully configured, ignoring any local .env.
+
+    `_env_file=None` matters: without it the developer's own .env leaks in and
+    silently supplies the very field under test.
+    """
+    from app.core.config import Settings
+
+    base = {
+        "telephony_enabled": True,
+        "stt_provider": "faster_whisper",
+        "tts_provider": "piper",
+        "vad_provider": "silero",
+        "asterisk_ari_user": "clinic-ai",
+        "asterisk_ari_password": "test-only-not-a-real-secret",
+        "telephony_media_advertise_host": "",
+    }
+    return Settings(_env_file=None, **{**base, **overrides})
+
+
+def test_a_wildcard_bind_without_an_advertised_host_is_refused() -> None:
+    """Asterisk cannot dial 0.0.0.0.
+
+    Binding wide is right when the PBX is on another host, but then something
+    has to tell Asterisk *which* address to come back to. Left unset, the call
+    connects, the media channel never does, and the caller hears silence — so
+    this fails at start-up, where the message can name the setting to fix.
+    """
+    from app.core.errors import ProviderUnavailableError
+    from app.telephony.factory import build_telephony_service
+
+    settings = _telephony_settings(telephony_media_host="0.0.0.0")  # noqa: S104
+
+    with pytest.raises(ProviderUnavailableError, match="ADVERTISE"):
+        build_telephony_service(settings=settings, voice_factory=lambda *_: None)
+
+
+def test_a_loopback_bind_advertises_itself() -> None:
+    """PBX and application on one host: the two addresses are legitimately equal."""
+    from app.telephony.factory import build_telephony_service
+
+    settings = _telephony_settings(telephony_media_host="127.0.0.1")
+    service = build_telephony_service(settings=settings, voice_factory=lambda *_: None)
+
+    assert service._media_advertise_host == "127.0.0.1"
+
+
+def test_the_advertised_host_is_what_asterisk_is_told_to_dial() -> None:
+    """The bind address must never reach Asterisk as a media destination."""
+    from app.telephony.factory import build_telephony_service
+
+    settings = _telephony_settings(
+        telephony_media_host="0.0.0.0",  # noqa: S104
+        telephony_media_advertise_host="192.0.2.10",  # TEST-NET-1, per RFC 5737
+    )
+    service = build_telephony_service(settings=settings, voice_factory=lambda *_: None)
+
+    assert service._media_advertise_host == "192.0.2.10"
+    assert service._media_host == "0.0.0.0"  # noqa: S104

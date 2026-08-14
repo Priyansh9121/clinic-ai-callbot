@@ -11,10 +11,14 @@
 ;
 
 [globals]
-; Where the clinic AI's AudioSocket media server is listening. Loopback unless
-; Asterisk runs on a different host, in which case use the private media
-; network address — never a public one.
-AI_MEDIA_HOST=127.0.0.1
+; Where the clinic AI's AudioSocket media server is listening, as *this PBX*
+; must dial it. With Asterisk in a VM that is the host's address on the VM
+; network (e.g. 192.168.65.1), never 127.0.0.1 — inside the VM that is the VM.
+;
+; The application supplies this itself when it originates the media channel
+; (TELEPHONY_MEDIA_ADVERTISE_HOST), so these are only needed by a
+; dialplan-driven AudioSocket setup.
+AI_MEDIA_HOST=192.168.65.1
 AI_MEDIA_PORT=8090
 ; Health endpoint the dialplan consults before trusting the AI with a caller.
 AI_HEALTH_URL=http://127.0.0.1:8000/health/live
@@ -23,10 +27,23 @@ AI_HEALTH_URL=http://127.0.0.1:8000/health/live
 ; ---------------------------------------------------------------------------
 ; Where softphones live. Development only.
 ; ---------------------------------------------------------------------------
-[clinic-internal]
-; 200 — the caller's softphone. Dials the AI.
-exten => 500,1,NoOp(caller reaching the clinic AI)
+; The context your softphone endpoints use. Named `ai-internal` to match the
+; validated development topology; change it here and in pjsip.conf together.
+[ai-internal]
+; --- Proof-of-life, no AI involved -------------------------------------------
+; Dial this FIRST after any change. If 600 does not play, the problem is SIP,
+; RTP or codecs — not the clinic application, and not worth debugging there.
+exten => 600,1,NoOp(audio path test - no AI)
+ same => n,Answer()
+ same => n,Playback(hello-world)
+ same => n,Hangup()
+
+; --- The clinic AI -----------------------------------------------------------
+exten => 700,1,NoOp(caller reaching the clinic AI)
  same => n,Goto(clinic-ai-entry,s,1)
+
+; Kept as an alias so older documentation and dialplans still work.
+exten => 500,1,Goto(clinic-ai-entry,s,1)
 
 ; 100 — the test "reception" endpoint, so transfers can be observed ringing.
 exten => 100,1,NoOp(reception)
@@ -34,6 +51,8 @@ exten => 100,1,NoOp(reception)
  same => n,Hangup()
 
 ; Let softphones ring each other while testing the environment itself.
+exten => _1XXX,1,Dial(PJSIP/${EXTEN},20)
+ same => n,Hangup()
 exten => _2XX,1,Dial(PJSIP/${EXTEN},20)
  same => n,Hangup()
 
@@ -54,7 +73,10 @@ exten => s,1,NoOp(clinic AI entry)
  same => n,GotoIf($["${AI_HEALTH}" = ""]?fallback)
  ; Hand the channel to the Stasis application. From here the clinic
  ; application answers, bridges in AudioSocket media, and converses.
- same => n,Stasis(${STASIS_APP})
+ ; The Stasis application name must match ASTERISK_APP_NAME in the backend's
+ ; .env. A mismatch is silent: the call reaches Stasis, nothing is listening,
+ ; and the caller falls through to the reception fallback below.
+ same => n,Stasis(clinic-ai)
  ; Stasis returned without transferring: the app finished or failed.
  same => n,Goto(fallback)
 

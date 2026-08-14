@@ -73,15 +73,32 @@ def build_telephony_service(
             public_message="Telephony is not configured.",
         )
 
+    if not settings.media_advertise_is_routable:
+        # A wildcard bind with no advertised address would have us hand
+        # Asterisk "0.0.0.0" as a media destination. The call connects, the
+        # media channel never does, and the caller hears silence — so fail
+        # here, at start-up, where the message can say what to set.
+        raise ProviderUnavailableError(
+            detail=(
+                "TELEPHONY_MEDIA_HOST is a wildcard bind, so "
+                "TELEPHONY_MEDIA_ADVERTISE_HOST must be set to the address "
+                "Asterisk should dial for media"
+            ),
+            public_message="Telephony media address is not configured.",
+        )
+
     manager = call_manager(settings)
     service = TelephonyService(
         ari=ari_client(settings),
         media_host=settings.telephony_media_host,
+        media_advertise_host=settings.media_advertise_host,
         media_port=settings.telephony_media_port,
         destinations=destination_registry(settings),
         voice_factory=voice_factory,
         manager=manager,
         hangup_drain_ms=settings.telephony_hangup_drain_ms,
+        wire_format=wire_format(settings),
+        resample_quality=settings.telephony_resample_quality,
     )
     return service
 

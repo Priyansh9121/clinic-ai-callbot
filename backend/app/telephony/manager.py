@@ -131,6 +131,11 @@ class CallSession:
         return self._stats
 
     @property
+    def voice(self) -> VoiceSession | None:
+        """The voice session this call is running, once it has been built."""
+        return self._voice
+
+    @property
     def dtmf_digits(self) -> str:
         """Digits pressed so far.
 
