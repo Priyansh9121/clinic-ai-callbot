@@ -44,6 +44,7 @@ from app.voice.endpointing import EndpointConfig, Endpointer, EndpointReason
 from app.voice.speech_text import for_speech
 from app.voice.states import (
     INTERRUPTIBLE_STATES,
+    SessionEndReason,
     StaleTurnError,
     TurnToken,
     TurnTracker,
@@ -156,6 +157,7 @@ class VoiceSession:
         self._consecutive_no_speech = 0
         self._barge_in_frames = 0
         self._stop_requested = asyncio.Event()
+        self._end_reason: SessionEndReason | None = None
         self._turn_metrics: list[VoiceTurnMetrics] = []
         # Notifies the CLI without this class knowing anything about a UI.
         self._on_event = on_event
@@ -202,6 +204,8 @@ class VoiceSession:
             if self._config.greet_on_start:
                 await self._greet()
             await self._listen_loop()
+            # Nothing set a reason, so the frame source ended on its own.
+            self._note_end(SessionEndReason.MEDIA_ENDED)
             # The frame source ended (or stop was requested). Give a turn that
             # is still speaking a moment to finish, so the caller hears the
             # last reply rather than having it cut off by teardown.
@@ -216,9 +220,19 @@ class VoiceSession:
         waiting for the next frame — without this it would only notice the stop
         request after the caller happened to make a noise.
         """
+        self._note_end(SessionEndReason.STOP_REQUESTED)
         self._stop_requested.set()
         with contextlib.suppress(Exception):
             await self._input.stop()
+
+    def _note_end(self, reason: SessionEndReason) -> None:
+        """Record why the session is ending. First reason wins.
+
+        A caller hangup that lands while a turn is unwinding must not be
+        relabelled by whatever the teardown does next.
+        """
+        if self._end_reason is None:
+            self._end_reason = reason
 
     async def _shutdown(self) -> None:
         self._set_state(VoiceState.STOPPING)
@@ -227,7 +241,11 @@ class VoiceSession:
         await self._output.stop_immediately()
         await self._input.stop()
         await self._output.stop()
-        logger.info("voice.session_ended", turns=len(self._turn_metrics))
+        logger.info(
+            "voice.session_ended",
+            turns=len(self._turn_metrics),
+            reason=(self._end_reason or SessionEndReason.MEDIA_ENDED).value,
+        )
 
     async def _greet(self) -> None:
         """Speak the greeting, which also creates the conversation session.
@@ -396,6 +414,7 @@ class VoiceSession:
         self._consecutive_no_speech += 1
         if self._consecutive_no_speech > self._config.max_consecutive_no_speech:
             logger.info("voice.no_speech_limit", reason=reason.value)
+            self._note_end(SessionEndReason.NO_SPEECH_LIMIT)
             self._stop_requested.set()
             return
         self._set_state(VoiceState.LISTENING)
@@ -441,6 +460,7 @@ class VoiceSession:
                 metrics.increment(M.STT_EMPTY)
                 self._consecutive_no_speech += 1
                 if self._consecutive_no_speech > self._config.max_consecutive_no_speech:
+                    self._note_end(SessionEndReason.NO_SPEECH_LIMIT)
                     self._stop_requested.set()
                     return
                 await self._speak(NO_SPEECH_REPROMPT, token)
@@ -464,6 +484,7 @@ class VoiceSession:
             self._emit("turn", {"result": reply, "metrics": stats})
 
             if reply.ended:
+                self._note_end(SessionEndReason.CONVERSATION_ENDED)
                 self._stop_requested.set()
         except StaleTurnError:
             metrics.increment(M.VOICE_STALE_RESPONSE_DISCARDED)

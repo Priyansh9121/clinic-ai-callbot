@@ -299,7 +299,17 @@ class AudioSocketChannel:
             while self._running:
                 data = await self._reader.read(4096)
                 if not data:
-                    logger.info("telephony.media_closed", call_id=self._call_id)
+                    # The peer closed its side. Whether that is the caller
+                    # hanging up or Asterisk giving up on us is not visible
+                    # here, but the frame count is: zero means it never sent
+                    # audio at all, which is a very different problem from it
+                    # stopping part way through.
+                    logger.info(
+                        "telephony.media_closed",
+                        call_id=self._call_id,
+                        reason="peer_eof",
+                        inbound_frames=self.inbound_frames_seen,
+                    )
                     break
                 try:
                     frames = self._decoder.feed(data)
@@ -322,6 +332,14 @@ class AudioSocketChannel:
                 "telephony.media_read_failed", call_id=self._call_id, error=type(exc).__name__
             )
         finally:
+            # The listen loop ends when this does, so this is where a call that
+            # went quiet after the greeting is explained.
+            logger.info(
+                "telephony.media_read_stopped",
+                call_id=self._call_id,
+                inbound_frames=self.inbound_frames_seen,
+                overruns=self.overruns,
+            )
             self._running = False
             self._closed.set()
             self._notify_hangup()

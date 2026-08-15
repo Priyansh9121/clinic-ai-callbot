@@ -21,6 +21,26 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 
+class SessionEndReason(StrEnum):
+    """Why a voice session stopped.
+
+    Bounded on purpose. ``voice.session_ended turns=0`` said what happened and
+    not why, which on a live call left the choice between reading every exit
+    path and guessing. Each value is set at exactly one place in the session,
+    and the first one set wins — a caller hangup that arrives while a turn is
+    finishing must not be relabelled by whatever unwinds afterwards.
+    """
+
+    #: The frame source ended: socket EOF, a read failure, or input stopped.
+    MEDIA_ENDED = "media_ended"
+    #: The call layer asked us to stop — caller hangup, or a transfer.
+    STOP_REQUESTED = "stop_requested"
+    #: Too many consecutive turns produced nothing usable.
+    NO_SPEECH_LIMIT = "no_speech_limit"
+    #: The conversation reached its own end and said goodbye.
+    CONVERSATION_ENDED = "conversation_ended"
+
+
 class VoiceState(StrEnum):
     #: Session created, not yet capturing.
     IDLE = "IDLE"
