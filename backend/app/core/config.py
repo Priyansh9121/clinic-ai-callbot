@@ -193,9 +193,20 @@ class Settings(BaseSettings):
     vad_threshold: float = 0.5
 
     # --- Endpointing -------------------------------------------------------
-    # Silence after speech that ends a turn. 500 ms measured as the balance
-    # between cutting people off and feeling sluggish; see the voice benchmark.
-    voice_end_silence_ms: int = 500
+    # Silence after speech that ends a turn.
+    #
+    # STOPGAP at 700 while a semantic turn detector is evaluated. 500 was
+    # chosen on a fluent corpus that split nothing at any threshold; on
+    # utterances that pause mid-way it splits 14, including a spelled surname
+    # five times and a date of birth in half. 700 takes that to 3 for ~200 ms
+    # of median latency. See scripts/benchmark_voice.py --sweep-endpointing.
+    voice_end_silence_ms: int = 700
+    #: Semantic end-of-turn detector. "none" is the silence rule alone, and is
+    #: the default: smart_turn_v3 was evaluated and did not discriminate on our
+    #: corpus (see docs/architecture/voice-pipeline.md). Kept selectable so the
+    #: evaluation can be repeated without re-plumbing it.
+    voice_turn_detector: Literal["none", "smart_turn_v3"] = "none"
+    voice_turn_detector_model: str = "models/smart-turn/smart-turn-v3.2-cpu.onnx"
     # How long to wait for the caller to say anything at all.
     voice_initial_silence_ms: int = 6_000
     # Shorter bursts are a cough or a door, not a turn.

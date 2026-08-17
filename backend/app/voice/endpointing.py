@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from app.speech.providers import FRAME_MS, SpeechEvent
+from app.voice.turn_detector import TurnDetector
 
 
 class EndpointReason(StrEnum):
@@ -46,10 +47,19 @@ class EndpointReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class EndpointConfig:
-    end_silence_ms: int = 500
+    end_silence_ms: int = 700
     initial_silence_ms: int = 6_000
     min_speech_ms: int = 200
     max_utterance_ms: int = 20_000
+    #: Silence before the turn detector is first consulted. Below this the
+    #: caller is almost certainly mid-word, and asking is wasted CPU.
+    detector_floor_ms: int = 120
+    #: Minimum gap between consultations. The model costs ~22 ms; asking on
+    #: every 20 ms frame would spend more CPU than the turn it is shortening.
+    detector_interval_ms: int = 100
+    #: P(complete) above which the model may end the turn. High on purpose —
+    #: see the class docstring on which error is the expensive one.
+    detector_threshold: float = 0.85
 
     def __post_init__(self) -> None:
         if self.end_silence_ms <= 0 or self.min_speech_ms < 0:
@@ -82,6 +92,9 @@ class Endpointer:
     """
 
     config: EndpointConfig = field(default_factory=EndpointConfig)
+    #: Optional semantic detector. None is a complete configuration — it is
+    #: what runs with no model on disk, and what every test uses.
+    detector: TurnDetector | None = None
 
     _speech_frames: int = field(default=0, init=False)
     _silence_frames: int = field(default=0, init=False)
@@ -90,6 +103,12 @@ class Endpointer:
     _finished: bool = field(default=False, init=False)
     _last_speech_at: float | None = field(default=None, init=False)
     _started_at: float | None = field(default=None, init=False)
+    #: Silence at which the detector was last consulted, so it is asked a few
+    #: times per turn rather than fifty times a second.
+    _last_consult_ms: float = field(default=-10_000.0, init=False)
+    #: Diagnostics, for the benchmark rather than the call path.
+    _consults: int = field(default=0, init=False)
+    _last_probability: float = field(default=0.0, init=False)
 
     @property
     def speech_started(self) -> bool:
@@ -107,7 +126,13 @@ class Endpointer:
     def utterance_ms(self) -> float:
         return self._total_frames * FRAME_MS
 
-    def process(self, event: SpeechEvent | None, *, is_speech: bool) -> Endpoint | None:
+    def process(
+        self,
+        event: SpeechEvent | None,
+        *,
+        is_speech: bool,
+        audio: bytes | None = None,
+    ) -> Endpoint | None:
         """Advance by one frame. Returns an ``Endpoint`` when the turn is over.
 
         ``event`` is the VAD's transition (or None); ``is_speech`` is its
@@ -141,6 +166,28 @@ class Endpointer:
                 return self._finish(EndpointReason.NO_SPEECH, now)
             return None
 
+        # The detector may end a turn early, never extend one. If it is absent,
+        # unavailable, or unsure, the silence rule below decides exactly as it
+        # did before — so a missing model costs latency and nothing else.
+        if (
+            self.detector is not None
+            and audio
+            and self._speech_started
+            and self.silence_ms >= self.config.detector_floor_ms
+            and self.silence_ms - self._last_consult_ms >= self.config.detector_interval_ms
+        ):
+            self._last_consult_ms = self.silence_ms
+            self._consults += 1
+            probability = self.detector.is_complete(audio)
+            self._last_probability = probability
+            if probability >= self.config.detector_threshold:
+                reason = (
+                    EndpointReason.END_SILENCE
+                    if self.speech_ms >= self.config.min_speech_ms
+                    else EndpointReason.TOO_SHORT
+                )
+                return self._finish(reason, now)
+
         if self.silence_ms >= self.config.end_silence_ms:
             reason = (
                 EndpointReason.END_SILENCE
@@ -161,7 +208,18 @@ class Endpointer:
             endpoint_latency_ms=round(latency, 1),
         )
 
+    @property
+    def consults(self) -> int:
+        """How many times the detector was asked during this turn."""
+        return self._consults
+
+    @property
+    def last_probability(self) -> float:
+        return self._last_probability
+
     def reset(self) -> None:
+        self._last_consult_ms = -10_000.0
+        self._consults = 0
         self._speech_frames = 0
         self._silence_frames = 0
         self._total_frames = 0

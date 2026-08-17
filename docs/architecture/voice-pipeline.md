@@ -347,3 +347,72 @@ interrupt itself.
 Push-to-talk exists to separate layers when something feels wrong: if it
 transcribes correctly but normal mode does not, the problem is VAD or
 endpointing; if it transcribes badly too, the problem is STT or the microphone.
+
+
+## End-of-turn detection: what was evaluated and why it is not adopted
+
+The silence rule answers "has this person stopped making noise?", which is not
+the question. Measured with `benchmark_voice.py --sweep-endpointing`, which now
+includes seven utterances that pause mid-way:
+
+| end-silence | splits on hard cases |
+|---|---|
+| 250 ms | 18 |
+| 500 ms | 12–14 |
+| **700 ms (current)** | **3** |
+| 900 ms | 0 |
+
+At the previous 500 ms setting a spelled "H-U-G-H-E-S" split five times and a
+date of birth and a mobile number were each cut in half — on live calls, during
+exactly the identity collection where being interrupted costs a whole turn.
+700 ms is a stopgap: it costs ~200 ms of median latency and takes splits to 3.
+
+### LiveKit turn-detector — rejected
+
+`license: other`, and the LICENSE forbids the use outright: *"you may use these
+LiveKit models freely but can only use them together with the LiveKit Agents
+framework. You cannot use the LiveKit models on a standalone basis or with any
+other frameworks."* Not a preference — a prohibition. It is also a text
+classifier over Qwen2.5-0.5B, so it needs a partial transcript, and
+faster-whisper has no streaming decoder to produce one.
+
+### Smart Turn v3 — implemented, measured, not adopted
+
+pipecat-ai, BSD-2-Clause, 8 MB int8 ONNX, Whisper-Tiny encoder plus a linear
+head. Runs on the onnxruntime Silero already uses; v2 was rejected because it
+ships only safetensors and would drag in torch.
+
+**Cost is not the problem.** Measured on this machine: 21 ms inference at four
+threads, 1.5 ms for the log-mel — ~22 ms per decision, affordable against the
+466 ms it would save.
+
+**It did not discriminate on our corpus.** P(complete) for finished and
+unfinished utterances, Piper-rendered:
+
+| | P(complete) |
+|---|---|
+| "I would like to book an appointment" (finished) | 0.726 |
+| "yes that works" (finished) | 0.724 |
+| "Hughes" (finished) | 0.707 |
+| "I need an appointment with" (unfinished) | 0.721 |
+| "my number is zero four" (unfinished) | 0.725 |
+| "I was wondering if" (unfinished) | 0.586 |
+
+The ranges overlap almost entirely and "my number is zero four" scores above
+"yes that works". Against the hard-case harness the hybrid column is identical
+to the 700 ms silence column — it never fires, so it is a no-op that costs CPU.
+
+Ruled out: padding convention (audio at either end of the 8 s window, tested
+both) and quantization (v3.0 and v3.2-cpu behave the same).
+
+**Not ruled out, and the reason this is not a verdict on the model:** the
+evaluation corpus is Piper reading scripted phrases. The model is trained on
+human speech, and near-constant output around 0.7 is what a model produces on
+input it does not recognise. Feature normalisation is the other candidate —
+faster-whisper's extractor is Whisper-compatible, which the architecture
+implies is right, but "implied" is not "verified against the training
+pipeline".
+
+Settling it needs human audio, which needs consented clinic recordings. Until
+then the integration stays behind `VOICE_TURN_DETECTOR=none` so the evaluation
+can be repeated without re-plumbing it.
