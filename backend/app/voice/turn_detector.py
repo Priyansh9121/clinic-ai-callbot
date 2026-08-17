@@ -115,11 +115,18 @@ class SmartTurnV3Detector:
             audio = audio[-window:]
             if audio.size < window:
                 audio = np.pad(audio, (window - audio.size, 0))
+            # Zero-mean unit-variance on the waveform, which is what the
+            # reference gets from WhisperFeatureExtractor(do_normalize=True).
+            # faster-whisper's extractor does not do this, and without it the
+            # model sees an input scale it was never trained on.
+            audio = (audio - audio.mean()) / np.sqrt(audio.var() + 1e-7)
             mel = np.asarray(features(audio), dtype=np.float32)[:, :MEL_FRAMES]
             if mel.shape != (MEL_BINS, MEL_FRAMES):
                 return 0.0
-            logits = session.run(None, {"input_features": mel[None, ...]})[0]
-            return float(1.0 / (1.0 + np.exp(-float(logits.reshape(-1)[0]))))
+            # The ONNX graph ends in a sigmoid: this is already P(complete).
+            # Applying another one squashed every input into [0.5, 0.731] and
+            # made a working model look like it could not discriminate.
+            return float(session.run(None, {"input_features": mel[None, ...]})[0].reshape(-1)[0])
         except Exception as exc:
             logger.warning("voice.turn_detector_failed", error=type(exc).__name__)
             return 0.0

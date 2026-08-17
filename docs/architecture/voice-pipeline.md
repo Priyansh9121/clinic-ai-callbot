@@ -386,33 +386,44 @@ ships only safetensors and would drag in torch.
 threads, 1.5 ms for the log-mel — ~22 ms per decision, affordable against the
 466 ms it would save.
 
-**It did not discriminate on our corpus.** P(complete) for finished and
-unfinished utterances, Piper-rendered:
+**A double sigmoid made a working model look broken.** The first evaluation
+reported P(complete) in a 0.14-wide band for every input and concluded the model
+could not discriminate. That was wrong, and the shape of the error was the clue:
+domain mismatch degrades discrimination, it does not collapse it. The ONNX graph
+already ends in a sigmoid, and applying another maps all of [0, 1] into
+[0.500, 0.731] — the observed range was 0.504 to 0.728. The reference
+implementation says so in a comment. Our features were also missing
+`do_normalize`, the zero-mean unit-variance step
+`WhisperFeatureExtractor(do_normalize=True)` applies and faster-whisper's
+extractor does not.
 
-| | P(complete) |
-|---|---|
-| "I would like to book an appointment" (finished) | 0.726 |
-| "yes that works" (finished) | 0.724 |
-| "Hughes" (finished) | 0.707 |
-| "I need an appointment with" (unfinished) | 0.721 |
-| "my number is zero four" (unfinished) | 0.725 |
-| "I was wondering if" (unfinished) | 0.586 |
+Fixed, it discriminates: "I was wondering if" 0.046, "yes that works" 0.834,
+"fourteen March nineteen fifty eight" 0.980.
 
-The ranges overlap almost entirely and "my number is zero four" scores above
-"yes that works". Against the hard-case harness the hybrid column is identical
-to the 700 ms silence column — it never fires, so it is a no-op that costs CPU.
+**It still cannot beat the silence rule on our hard cases at any threshold.**
 
-Ruled out: padding convention (audio at either end of the 8 s window, tested
-both) and quantization (v3.0 and v3.2-cpu behave the same).
+| endpointer | hard-case splits | fluent median lag |
+|---|---|---|
+| 500 ms silence | 13 | 548 ms |
+| **700 ms silence (current)** | **3** | **748 ms** |
+| v3 @ 0.85 | 12 | 177 ms |
+| v3 @ 0.95 | 10 | 265 ms |
+| v3 @ 0.98 | 4 | 736 ms |
+| v3 @ 0.995 | 3 | 748 ms |
 
-**Not ruled out, and the reason this is not a verdict on the model:** the
-evaluation corpus is Piper reading scripted phrases. The model is trained on
-human speech, and near-constant output around 0.7 is what a model produces on
-input it does not recognise. Feature normalisation is the other candidate —
-faster-whisper's extractor is Whisper-compatible, which the architecture
-implies is right, but "implied" is not "verified against the training
-pipeline".
+The trade is monotonic. Every millisecond of latency the model saves costs
+hard-case splits, and at the threshold where clipping finally matches the
+silence rule (0.995) the latency matches it too — the model has stopped firing.
+There is no setting that gives both.
+
+Where it goes wrong is specific: a spelled "H-U-G-H-E-S" splits five times at
+0.85, and "my number is zero four" scores 0.957. Both are Piper rendering an
+unfinished phrase with finished-sounding prosody, which is what a synthetic
+corpus does and a real caller does not. So the synthetic-audio caveat is now
+load-bearing rather than a guess — but it is a reason the result is *unproven*,
+not a reason to adopt.
 
 Settling it needs human audio, which needs consented clinic recordings. Until
 then the integration stays behind `VOICE_TURN_DETECTOR=none` so the evaluation
-can be repeated without re-plumbing it.
+can be repeated without re-plumbing it — and the bar is unchanged: it beats the
+700 ms silence rule on the hard-case harness, or it stays off.
