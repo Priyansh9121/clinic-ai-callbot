@@ -243,6 +243,15 @@ class AudioSocketChannel:
         self._uuid_seen = asyncio.Event()
         self._drained = asyncio.Event()
         self._drained.set()
+        #: Set when the first audio of a reply enters an idle transport, and
+        #: cleared when that reply's first frame is actually written. The gap
+        #: is the transport's own contribution to what the caller waits for —
+        #: resampler batching, the outbound queue and the pacer — which no
+        #: measurement above this layer can see.
+        self._reply_started_at: float | None = None
+        #: Milliseconds from first audio in to first byte on the wire, for the
+        #: most recent reply. None until a reply has been sent.
+        self.last_reply_wire_latency_ms: float | None = None
         self._running = False
         self._sending = False
         #: Frame delivery to the voice session. Separate from the socket's own
@@ -473,6 +482,11 @@ class AudioSocketChannel:
         """
         if not self._running:
             return
+        # Idle until now means this is the first audio of a reply. Timed from
+        # here rather than from the pacer, because the resampler holds audio
+        # back before the queue ever sees it and that wait is the caller's too.
+        if self._drained.is_set():
+            self._reply_started_at = time.monotonic()
         self._drained.clear()
         self._enqueue_wire(self._format.from_pcm16(self._down.convert(pcm)))
 
@@ -526,6 +540,12 @@ class AudioSocketChannel:
                 if not self._running:
                     return
                 self._sending = True
+                if self._reply_started_at is not None:
+                    self.last_reply_wire_latency_ms = (
+                        time.monotonic() - self._reply_started_at
+                    ) * 1000
+                    self._reply_started_at = None
+                    metrics.observe(M.TELEPHONY_REPLY_WIRE_LATENCY, self.last_reply_wire_latency_ms)
                 # Already wire-format and exactly one frame: see send().
                 self._writer.write(audio_frame(frame))
                 await self._writer.drain()

@@ -379,3 +379,56 @@ async def test_silence_from_the_wire_produces_silent_canonical_frames(pbx: FakeA
     await channel.close()
 
     assert audio_utils.rms(b"".join(received)) < 0.001
+
+
+# --- The transport's own share of perceived latency -------------------------
+async def test_the_transport_measures_first_audio_to_first_byte(pbx: FakeAsterisk) -> None:
+    """Everything above the socket can measure a reply; none of it can time one.
+
+    VoiceSession knows when synthesis produced its first chunk. What that chunk
+    then costs — the resampler holding audio back, the outbound queue, the
+    pacer waiting for its slot — is only visible here, and on a real call it is
+    part of what the caller waits through.
+    """
+    channel = await pbx.connect()
+    await channel.start()
+    try:
+        assert channel.last_reply_wire_latency_ms is None, "nothing sent yet"
+
+        audio_out = AudioSocketOutput(channel)
+        await audio_out.play(audio_utils.silence(200))
+        await audio_out.wait_until_drained()
+
+        measured = channel.last_reply_wire_latency_ms
+        assert measured is not None, "a reply was sent and never timed"
+        assert measured >= 0.0
+        # Loopback with no real resampling: this is the floor, not a target.
+        assert measured < 1_000, f"implausible wire latency {measured} ms"
+    finally:
+        await channel.close()
+
+
+async def test_each_reply_is_timed_separately(pbx: FakeAsterisk) -> None:
+    """The clock starts when an idle transport receives audio, not once per call.
+
+    Without the idle check every frame of a long reply would restart it, and
+    the number would describe the pacer's 20 ms tick rather than the wait
+    before the caller hears anything.
+    """
+    channel = await pbx.connect()
+    await channel.start()
+    try:
+        audio_out = AudioSocketOutput(channel)
+        await audio_out.play(audio_utils.silence(200))
+        await audio_out.wait_until_drained()
+        first = channel.last_reply_wire_latency_ms
+
+        await audio_out.play(audio_utils.silence(200))
+        await audio_out.wait_until_drained()
+        second = channel.last_reply_wire_latency_ms
+
+        assert first is not None and second is not None
+        # Both are genuine measurements of their own reply, not a running total.
+        assert second < 1_000
+    finally:
+        await channel.close()

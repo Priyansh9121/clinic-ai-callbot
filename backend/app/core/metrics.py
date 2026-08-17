@@ -201,6 +201,11 @@ class M:
     TELEPHONY_ACTIVE_CALLS = "telephony.active_calls"
     TELEPHONY_CALL_DURATION = "telephony.call_duration"
     TELEPHONY_ANSWER_TO_FIRST_AUDIO = "telephony.answer_to_first_audio"
+    #: First audio of a reply entering the transport -> first byte on the wire.
+    #: The transport's own share of perceived latency: resampler batching, the
+    #: outbound queue and the pacer. Everything past the socket — Asterisk
+    #: buffering, the SIP leg, the handset — is not observable from here.
+    TELEPHONY_REPLY_WIRE_LATENCY = "telephony.reply_wire_latency"
     TELEPHONY_INBOUND_FRAMES = "telephony.inbound_audio_frames"
     TELEPHONY_OUTBOUND_FRAMES = "telephony.outbound_audio_frames"
     TELEPHONY_AUDIO_OVERRUN = "telephony.audio_overrun"

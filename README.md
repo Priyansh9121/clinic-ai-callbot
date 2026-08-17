@@ -14,11 +14,14 @@ transactional.
 > transport makes a phone call behave like that same voice session. Everything
 > — speech recognition, synthesis and the language model — runs on the machine.
 >
-> The telephony transport has **not** been exercised against a live Asterisk in
-> this environment (see [Implementation status](#implementation-status)); its
-> media path is covered by tests over real sockets, and
+> The telephony transport **has** now run against a live Asterisk 20.6.0: SIP,
+> ARI, `Stasis(clinic-ai)`, bridging and the AudioSocket media leg all work on
+> a real call to extension 700, and the greeting is audible in the agent's
+> voice. **Two-way audio is not yet confirmed** — the return path was being
+> decoded as the wrong format, which is fixed but untested on a call. See
+> [Implementation status](#implementation-status);
 > [`docs/development/local-sip.md`](docs/development/local-sip.md) carries the
-> manual acceptance script.
+> manual acceptance script and what it has covered so far.
 >
 > **All data in this repository is fictional.** "Riverside Medical Clinic", its
 > practitioners and its patients are synthetic development fixtures. This
@@ -177,14 +180,14 @@ pipeline runs unchanged.
 
 ```bash
 uv run python scripts/telephony_status.py       # config + PBX reachability
-cd backend && uv run pytest tests/telephony -q  # 72 tests, no Asterisk needed
+cd backend && uv run pytest tests/telephony -q  # 141 tests, no Asterisk needed
 uv run pytest -m telephony_live -q              # needs a running PBX
 ```
 
-Asterisk is not installed on the development machine this was built on, and
-deliberately so — see
-[docs/development/local-sip.md](docs/development/local-sip.md) for why, how to
-run one, and the manual acceptance script.
+Asterisk runs in a UTM Ubuntu VM beside the development machine, not on it —
+see [docs/development/local-sip.md](docs/development/local-sip.md) for the
+validated topology, the two media addresses that decide whether a connected
+call has any audio, and the manual acceptance script.
 
 ## Talk to it out loud
 
@@ -540,7 +543,7 @@ change is an explicit operational step, not a side effect of a restart.
 | 1 | Database, appointments, conversation engine, safety, text API, simulator, tests | **complete** |
 | 2 | Local LLM behind the analyser interface, strict validation, hint resolution, fallback, shadow mode, benchmark | **complete** |
 | 3 | STT, TTS, VAD, streaming audio, barge-in, latency metrics | **complete** |
-| 4 | Asterisk/PJSIP transport, ARI call control, AudioSocket media, transfer, call isolation | **implemented — manual SIP acceptance outstanding** |
+| 4 | Asterisk/PJSIP transport, ARI call control, AudioSocket media, transfer, call isolation | **implemented; a live call reaches the caller — inbound audio unconfirmed** |
 | 4B | SIP trunk, Australian DID, PSTN cutover | not started (deployment step) |
 | 5 | OTP verification, staff dashboard, RBAC UI, load and red-team testing | partial (RBAC + audit trail exist) |
 
@@ -582,12 +585,16 @@ change is an explicit operational step, not a side effect of a restart.
   better-enunciated and noise-free compared with a real caller on a real line.
   Treat every accuracy figure as an upper bound. A clinic-recorded set, under
   consent, is needed before deployment.
-- **The telephony transport has never run against a live Asterisk.** The media
-  path, framing, pacing, codec conversion, call lifecycle, transfer allowlist
-  and session isolation are covered by 72 automated tests — the media ones over
-  real TCP sockets speaking the real AudioSocket protocol — but the ARI call
-  setup sequence has not been executed against a PBX. Manual SIP acceptance is
-  outstanding; the script is in `docs/development/local-sip.md`.
+- **Two-way telephone audio is not yet confirmed.** On a real call to extension
+  700 against Asterisk 20.6.0, SIP registration, `Stasis(clinic-ai)`, bridge
+  creation, the originated AudioSocket leg and VM → Mac media connectivity all
+  work, and the greeting is audible in the agent's voice. The *return* path is
+  not proven: Asterisk was negotiating `slin192` for the media channel because
+  the originate did not name a format, so 20 ms of audio arrived looking like
+  480 ms and the session hung up on a caller who was still listening to the
+  greeting. Naming the format explicitly is committed and untested on a call.
+  Until one turn completes over the phone, §3 of the acceptance script onwards
+  is untested.
 - **End-to-end telephone latency is unmeasured.** The Milestone 3 figure of
   1135 ms is the floor; a call adds the SIP leg, Asterisk buffering and
   resampler filter delay in both directions. No end-to-end number is claimed.

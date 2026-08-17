@@ -216,6 +216,7 @@ class CallSession:
         """Bridge from the voice layer. Must not block — it runs inline."""
         if kind == "turn":
             self._stats.turns += 1
+            self._log_turn_latency(payload.get("metrics"))
             result = payload.get("result")
             if result is not None and getattr(result, "requires_human", False):
                 # Scheduled, not awaited: this callback is invoked from inside
@@ -227,6 +228,40 @@ class CallSession:
                 self._stats.first_audio_at = time.perf_counter()
                 if (elapsed := self._stats.answer_to_first_audio_ms) is not None:
                     metrics.observe(M.TELEPHONY_ANSWER_TO_FIRST_AUDIO, elapsed)
+
+    def _log_turn_latency(self, stats: object) -> None:
+        """Emit one line carrying the whole speech-end -> on-the-wire breakdown.
+
+        The two halves are measured in different layers on purpose. VoiceSession
+        knows endpointing, STT, engine and synthesis but cannot see a socket;
+        the transport knows what the resampler, the queue and the pacer cost but
+        has no idea what a turn is. Neither seam is widened to join them —
+        CallSession is the one object that legitimately holds both, so the join
+        happens here.
+
+        `to_wire_ms` is the honest end of what this process can measure. What
+        the caller actually waits for additionally includes Asterisk's own
+        buffering, the SIP leg and the handset's jitter buffer, none of which
+        are observable from here — that difference needs a packet capture or a
+        stopwatch and a human ear.
+        """
+        if stats is None:
+            return
+        to_first_audio = getattr(stats, "time_to_first_audio_ms", 0.0)
+        wire_ms = self._channel.last_reply_wire_latency_ms
+        logger.info(
+            "telephony.turn_latency",
+            call_id=self._call_id,
+            turn=getattr(stats, "turn_id", None),
+            endpoint_ms=round(getattr(stats, "endpoint_latency_ms", 0.0)),
+            stt_ms=round(getattr(stats, "stt_ms", 0.0)),
+            engine_ms=round(getattr(stats, "engine_ms", 0.0)),
+            tts_first_audio_ms=round(getattr(stats, "tts_first_audio_ms", 0.0)),
+            acknowledged=getattr(stats, "acknowledged", False),
+            to_first_audio_ms=round(to_first_audio),
+            wire_ms=round(wire_ms) if wire_ms is not None else None,
+            to_wire_ms=round(to_first_audio + wire_ms) if wire_ms is not None else None,
+        )
 
     def _record_dtmf(self, digit: str) -> None:
         # Bounded: a caller leaning on the keypad must not grow a list forever.
