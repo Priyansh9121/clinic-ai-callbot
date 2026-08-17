@@ -427,3 +427,122 @@ Settling it needs human audio, which needs consented clinic recordings. Until
 then the integration stays behind `VOICE_TURN_DETECTOR=none` so the evaluation
 can be repeated without re-plumbing it — and the bar is unchanged: it beats the
 700 ms silence rule on the hard-case harness, or it stays off.
+
+
+## Streaming STT: the seam, and what was measured
+
+Endpointing is closed (the trade is monotonic; see above). STT is the only
+remaining pure gain, because transcribing *while* the caller speaks removes
+serial time rather than moving it somewhere else. Everything below is
+measurement; nothing is integrated.
+
+### The seam, if a streaming model is adopted
+
+The existing `SpeechToTextProvider` is one-shot and stays that way. A streaming
+model gets a second Protocol beside it:
+
+```python
+class StreamingSpeechToText(Protocol):        # extends, never replaces
+    def stream(self) -> "TranscriptStream": ...
+
+class TranscriptStream(Protocol):
+    def feed(self, frame: bytes) -> None: ...   # 20 ms, during speech
+    @property
+    def partial(self) -> str: ...               # advisory, diagnostics only
+    async def final(self) -> Transcript: ...    # after endpoint; authoritative
+```
+
+`VoiceSession` calls `feed()` from the listen loop it already runs, and
+`final()` when the endpointer fires. `base.en` stays selectable through
+`STT_PROVIDER` and is what runs when no weights are on disk.
+
+**Nothing downstream ever sees `partial`.** The turn token is minted at
+`final()`, and `_handle_turn` remains the only path from a transcript to the
+engine. A partial that is later revised is therefore *unobservable* rather than
+merely discouraged — there is no code path from it to a decision. That is the
+same construction as the LLM boundary: the guarantee comes from there being no
+edge in the graph, not from a rule someone has to remember.
+
+### Parakeet TDT 0.6b v3 — measured, rejected
+
+CC-BY-4.0, ONNX via `istupakov/parakeet-tdt-0.6b-v3-onnx`, decoded by
+`onnx-asr` (MIT) on numpy and onnxruntime alone — no torch, so the dependency
+objection that killed smart-turn-v2 does not apply.
+
+**Its encoder is full-context.** Inputs are `audio_signal` and `length` and
+nothing else: no cache, no state. Streaming with it would mean re-encoding a
+growing buffer, which is one-shot in disguise.
+
+| | |
+|---|---|
+| Disk (int8) | 639 MB |
+| RSS after load | 876 MB, against 1.02 GB free on this machine |
+| Load | 1809 ms |
+| Warm transcription, ~2 s utterance | 386 ms vs base.en 454 ms |
+
+**~70 ms for 876 MB, with a worse p95** (793 ms vs 691 ms). Rejected.
+
+### Whisper large-v3-turbo — measured, rejected on this hardware
+
+MIT, runs on the faster-whisper already installed. Not a streaming candidate at
+all — faster-whisper has no streaming decoder — so it was evaluated purely as
+an accuracy question.
+
+**It is markedly better on names**, which is the failure that prompted it:
+
+| spoken | base.en | large-v3-turbo |
+|---|---|---|
+| "Nguyen, N G U Y E N" | "Nuyin" | **"Nguyen"** |
+| "Siobhan" | "Shavorn" | **"Siobhan"** |
+| "Priyansh Ranpura" | "Pre-anch Rantpora" | **"Priyanch Ranpura"** |
+| "Woolloomooloo" | "woolly woolly" | "Walloo-mow-loo" |
+| Hughes / DOB / phone | correct | correct |
+
+Safety keywords survive on both. But it costs **~999 MB of RSS** and ran at
+**13.3 s per utterance** against base.en's 961 ms in the same process — 13x
+slower, on a machine already holding Ollama, Piper and Whisper. Unusable here
+regardless of its accuracy.
+
+Worth revisiting only on hardware with the headroom for it. The name accuracy
+is real and it is the right fix for that problem; this machine is the blocker.
+
+### Multilingual did not help on names
+
+Parakeet v3 is multilingual and mangled every non-Anglo name tested — "Nuyan",
+"Chivon", "Pre anch rampora", "Mullo Mulloo" — and was *worse* than base.en on
+"Hughes" and on numeric normalisation (base.en emits `14 March 1958` and
+`041-234-5678`, which the DOB and mobile parsers consume directly; Parakeet
+spells them out). The assumption that a multilingual model would be better on
+non-Anglo names did not survive measurement. Whisper turbo was better — but
+that is model size, not multilinguality.
+
+### Cache-aware streaming does exist
+
+`csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-80ms-int8`,
+a re-export of NVIDIA `stt_en_fastconformer_hybrid_large_streaming_80ms`.
+
+The signature is the whole test, and it passes:
+
+```
+cache_last_channel      [B, 17, 70, 512]      -> cache_last_channel_next
+cache_last_time         [B, 17, 512, 8]       -> cache_last_time_next
+cache_last_channel_len  [B]                   -> cache_last_channel_next_len
+```
+
+Feed one chunk plus the previous cache, get output plus the next cache. That is
+genuine streaming, not a growing buffer.
+
+| | |
+|---|---|
+| Encoder (int8) | **125 MB** — a fifth of Parakeet |
+| Encoder step | **16.6 ms** median, 21.3 ms p95, per 160 ms of audio |
+| Geometry | `window_size=25`, `chunk_shift=16`, subsampling 8, vocab 1024 |
+
+~10x real time, so the audio is consumed as it arrives and the cost after the
+caller stops is one final chunk step — on the order of tens of milliseconds
+rather than the 466 ms base.en spends today.
+
+**Unresolved before this can be adopted:** the sherpa re-export ships no
+LICENSE file. The upstream NeMo model is NVIDIA's and is normally CC-BY-4.0,
+but the re-export does not say so, and an unstated licence is not a permissive
+one. That needs settling before any integration.
