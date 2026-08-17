@@ -249,13 +249,25 @@ class AriClient:
         )
 
     async def originate_media_channel(
-        self, *, host: str, port: int, media_uuid: str, app_args: str = "media"
+        self,
+        *,
+        host: str,
+        port: int,
+        media_uuid: str,
+        app_args: str = "media",
+        media_format: str,
     ) -> str:
         """Dial the AudioSocket channel driver and return its channel id.
 
         The endpoint is built from *configuration* plus a UUID we generated —
         never from caller input. It addresses our own media server, so it is
         not a dialable telephone destination in any sense.
+
+        ``media_format`` is required rather than defaulted. Omitting ARI's
+        `formats` parameter lets Asterisk choose, and it chooses the best the
+        channel supports: slin192. Nothing announces that — the socket simply
+        delivers 384 kB/s that we decode as 8 kHz, so a 20 ms packet reads as
+        480 ms of audio and the session ages 24x faster than the caller.
         """
         response = await self._request(
             "POST",
@@ -264,6 +276,7 @@ class AriClient:
                 "endpoint": f"AudioSocket/{host}:{port}/{media_uuid}",
                 "app": self._app_name,
                 "appArgs": app_args,
+                "formats": media_format,
             },
         )
         return str(response.json()["id"])

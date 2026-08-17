@@ -93,6 +93,22 @@ class TelephonyFormat(StrEnum):
         return 16_000 if self is TelephonyFormat.SLIN16 else 8_000
 
     @property
+    def asterisk_name(self) -> str:
+        """What Asterisk calls this format, for ARI's `formats` parameter.
+
+        Must be sent on every originate. Left unspecified, ARI picks the best
+        format the channel can do — which on a modern Asterisk is slin192, so
+        every 20 ms packet arrives carrying 7680 bytes that we then read as
+        480 ms of 8 kHz audio.
+        """
+        return {
+            TelephonyFormat.SLIN: "slin",
+            TelephonyFormat.SLIN16: "slin16",
+            TelephonyFormat.PCMU: "ulaw",
+            TelephonyFormat.PCMA: "alaw",
+        }[self]
+
+    @property
     def bytes_per_sample(self) -> int:
         """1 for the G.711 companded formats, 2 for signed linear."""
         return 1 if self in (TelephonyFormat.PCMU, TelephonyFormat.PCMA) else 2
@@ -233,6 +249,8 @@ class AudioSocketChannel:
         #: lifetime: a session may need to stop listening while the channel
         #: stays open to transmit a goodbye.
         self._input_open = True
+        self._wire_bytes = 0
+        self._read_started_at: float | None = None
 
         self._on_hangup: Callable[[], None] | None = None
         self._on_dtmf: Callable[[str], None] | None = None
@@ -298,6 +316,9 @@ class AudioSocketChannel:
         try:
             while self._running:
                 data = await self._reader.read(4096)
+                if self._read_started_at is None:
+                    self._read_started_at = time.monotonic()
+                self._wire_bytes += len(data)
                 if not data:
                     # The peer closed its side. Whether that is the caller
                     # hanging up or Asterisk giving up on us is not visible
@@ -334,11 +355,22 @@ class AudioSocketChannel:
         finally:
             # The listen loop ends when this does, so this is where a call that
             # went quiet after the greeting is explained.
+            # The measured wire rate against what the configured format
+            # implies. A ratio far from 1.0 means Asterisk is sending a
+            # different format from the one we decode, which is otherwise
+            # invisible: the socket just delivers more bytes than it should and
+            # every duration computed from them is wrong by that factor.
+            elapsed = time.monotonic() - self._read_started_at if self._read_started_at else 0.0
+            expected = self._format.sample_rate * self._format.bytes_per_sample
+            measured = self._wire_bytes / elapsed if elapsed > 0.1 else 0.0
             logger.info(
                 "telephony.media_read_stopped",
                 call_id=self._call_id,
                 inbound_frames=self.inbound_frames_seen,
                 overruns=self.overruns,
+                wire_bytes_per_s=round(measured),
+                expected_bytes_per_s=expected,
+                rate_ratio=round(measured / expected, 2) if expected else 0.0,
             )
             self._running = False
             self._closed.set()

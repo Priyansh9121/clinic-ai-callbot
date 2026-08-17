@@ -38,6 +38,7 @@ class FakeAriClient:
         self.originate_gate: asyncio.Event | None = None
         self.media_channel_id = "media-chan-1"
         self.app_args_used: list[str] = []
+        self.formats_used: list[str] = []
 
     def on_event(self, handler: object) -> None:
         self._handler = handler
@@ -69,8 +70,15 @@ class FakeAriClient:
         self.continues.append((channel_id, context, extension))
 
     async def originate_media_channel(
-        self, *, host: str, port: int, media_uuid: str, app_args: str = "media"
+        self,
+        *,
+        host: str,
+        port: int,
+        media_uuid: str,
+        app_args: str = "media",
+        media_format: str,
     ) -> str:
+        self.formats_used.append(media_format)
         self.app_args_used.append(app_args)
         self.originated.append(media_uuid)
         if self.originate_gate is not None:
@@ -389,3 +397,47 @@ async def test_a_handler_that_raises_does_not_end_the_event_stream() -> None:
         await client._dispatch('{"type": "StasisStart"}')
     finally:
         await client.close()
+
+
+# --- The format must be named, never inferred -------------------------------
+async def test_the_media_channel_is_originated_with_an_explicit_format(destinations) -> None:
+    """Left to choose, Asterisk picks the best format the channel can do.
+
+    On Asterisk 20 that is slin192. Nothing announces it: the socket simply
+    delivers 384 kB/s where we expect 16, so every 20 ms packet decodes as
+    480 ms of 8 kHz audio and the session ages ~24x faster than the caller. The
+    endpointer counts frames as time, so six seconds of "initial silence"
+    elapsed in about 250 ms — three times over, and the call hung up on a
+    caller who had not finished hearing the greeting.
+
+    Measured across three live calls to extension 700: 371, 380 and 377 kB/s
+    against slin192's 384 kB/s exactly.
+    """
+    ari = FakeAriClient()
+    build_service(ari, destinations)
+
+    await ari.deliver(caller_start())
+
+    assert ari.formats_used, "no format was sent — Asterisk will choose one"
+    assert ari.formats_used[0] == "slin", (
+        f"expected the configured wire format, got {ari.formats_used[0]!r}"
+    )
+
+
+async def test_every_supported_wire_format_has_an_asterisk_name() -> None:
+    """The name we send must be the one Asterisk uses, not our enum value.
+
+    `ulaw` and `alaw` differ from our `pcmu`/`pcma`, and a format Asterisk does
+    not recognise is rejected at originate — which fails the call outright
+    rather than degrading.
+    """
+    from app.telephony.transport import TelephonyFormat
+
+    expected = {
+        TelephonyFormat.SLIN: "slin",
+        TelephonyFormat.SLIN16: "slin16",
+        TelephonyFormat.PCMU: "ulaw",
+        TelephonyFormat.PCMA: "alaw",
+    }
+    for wire_format, name in expected.items():
+        assert wire_format.asterisk_name == name

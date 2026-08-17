@@ -110,6 +110,7 @@ class TelephonyService:
         self._manager = manager or CallManager()
         self._hangup_drain_ms = hangup_drain_ms
         self._max_call_seconds = max_call_seconds
+        self._format = wire_format
 
         self._server = server or AudioSocketServer(
             self._attach_media,
@@ -232,6 +233,9 @@ class TelephonyService:
                 port=self.media_port,
                 media_uuid=media_uuid,
                 app_args=f"media,{media_uuid}",
+                # Name the format. Asterisk's own choice is the best the
+                # channel can do, not the one this process decodes.
+                media_format=self._format.asterisk_name,
             )
         except AriError as exc:
             metrics.increment(M.TELEPHONY_CALLS_FAILED, labels={"stage": "setup"})
