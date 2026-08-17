@@ -19,10 +19,13 @@ Sending the caller back to the dialplan to run ``AudioSocket()`` would be one
 step shorter and is a dead end: the channel leaves Stasis, and with it goes any
 ability to transfer the caller to a human.
 
-**Untested against a live PBX.** Steps 1 to 5 are written to the documented ARI
-and AudioSocket contracts but have not been run against Asterisk in this
-environment — see docs/development/local-sip.md for what the user must verify.
-Everything from step 6 onward is exercised by the test suite over real sockets.
+**Steps 1 to 5 are proven against Asterisk 20.6.0**: a real call to extension
+700 reaches Stasis, is answered, bridged and joined by the originated
+AudioSocket leg, and the greeting is audible to the caller. Step 6 has never
+completed a turn over the phone — inbound audio was being decoded as the wrong
+format, so no caller has yet been heard. `telephony.media_formats` logs what
+Asterisk actually negotiated in each direction; see docs/development/local-sip.md
+for the acceptance script and what it has covered.
 """
 
 from __future__ import annotations
@@ -260,8 +263,57 @@ class TelephonyService:
             # A stale or duplicated event for a call that has already finished.
             logger.debug("telephony.media_channel_unmatched")
             return
+        # Before and after, deliberately. A setup-only probe would report the
+        # format the channel was created with and miss a bridge renegotiating
+        # it — the right answer attached to the wrong outcome.
+        await self._log_negotiated_formats(channel_id, pending.bridge_id, stage="media_up")
         with contextlib.suppress(AriError):
             await self._ari.add_to_bridge(pending.bridge_id, channel_id)
+        await self._log_negotiated_formats(channel_id, pending.bridge_id, stage="bridged")
+
+    async def _log_negotiated_formats(self, channel_id: str, bridge_id: str, *, stage: str) -> None:
+        """Record what Asterisk actually negotiated, in each direction separately.
+
+        Read and write are reported apart and never collapsed, because the
+        interesting case is that they disagree. From Asterisk's point of view
+        of *our* AudioSocket channel:
+
+        * ``read``  — what Asterisk reads from us: the agent's synthesised
+          speech. A greeting that sounds normal means this one is right.
+        * ``write`` — what Asterisk writes to us: the caller. This is the
+          direction that has never worked.
+
+        ``chan_audiosocket`` advertises every slin rate, so a bridge picking
+        the best common format could plausibly do so in one direction only.
+        That is a hypothesis this log exists to test, not one it assumes:
+        symmetric-and-wrong, symmetric-and-right, and asymmetric are all
+        distinguishable from these fields.
+
+        Entirely diagnostic. Every call is suppressed — a probe must never be
+        the reason a call fails.
+        """
+        with contextlib.suppress(Exception):
+            read = await self._ari.channel_variable(channel_id, "CHANNEL(audioreadformat)")
+            write = await self._ari.channel_variable(channel_id, "CHANNEL(audiowriteformat)")
+            native = await self._ari.channel_variable(channel_id, "CHANNEL(audionativeformat)")
+            technology = None
+            with contextlib.suppress(Exception):
+                technology = (await self._ari.bridge(bridge_id)).get("technology")
+            logger.info(
+                "telephony.media_formats",
+                stage=stage,
+                channel=channel_id,
+                bridge=bridge_id,
+                bridge_technology=technology,
+                requested=self._format.asterisk_name,
+                read_format=read,
+                write_format=write,
+                native_formats=native,
+                # Stated rather than derived, so the log answers the question
+                # without anyone having to remember which way round it is.
+                agrees_with_request=(read == self._format.asterisk_name)
+                and (write == self._format.asterisk_name),
+            )
 
     async def _await_media(self, pending: _PendingCall) -> None:
         """Wait for the media socket, then run the call."""

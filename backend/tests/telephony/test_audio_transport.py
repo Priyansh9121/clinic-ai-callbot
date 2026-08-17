@@ -402,7 +402,11 @@ async def test_the_transport_measures_first_audio_to_first_byte(pbx: FakeAsteris
         measured = channel.last_reply_wire_latency_ms
         assert measured is not None, "a reply was sent and never timed"
         assert measured >= 0.0
-        # Loopback with no real resampling: this is the floor, not a target.
+        # DELIBERATELY LOOSE. This asserts the measurement happens and is not
+        # nonsense; it is not a regression bound. Loopback with no real
+        # resampling is nothing like a call, so a tight number here would
+        # describe the test rather than the transport. Pin this once a live
+        # call has produced a real figure — see docs/architecture/latency.md.
         assert measured < 1_000, f"implausible wire latency {measured} ms"
     finally:
         await channel.close()
@@ -428,7 +432,45 @@ async def test_each_reply_is_timed_separately(pbx: FakeAsterisk) -> None:
         second = channel.last_reply_wire_latency_ms
 
         assert first is not None and second is not None
-        # Both are genuine measurements of their own reply, not a running total.
+        # Both are measurements of their own reply rather than a running total.
+        # Bound is a smoke check, not a regression bound — see the note above.
         assert second < 1_000
+    finally:
+        await channel.close()
+
+
+async def test_the_transport_records_inbound_arrival_and_dwell(pbx: FakeAsterisk) -> None:
+    """endpoint_latency_ms is timed from when the VAD saw silence.
+
+    That is dwell_ms after the caller actually stopped talking, and if frames
+    arrive batched rather than every 20 ms it is later still. Without these two
+    readings a slow endpointer and a bursty transport look identical from
+    above, which is the confusion they exist to prevent.
+
+    Bounds are deliberately loose for the same reason as the outbound tests:
+    the fake delivers audio far faster than a phone line.
+    """
+    channel = await pbx.connect()
+    await channel.start()
+    try:
+        assert channel.inbound_arrival_mean_ms is None, "nothing received yet"
+        assert channel.inbound_dwell_mean_ms is None
+
+        audio_in = AudioSocketInput(channel)
+        received: list[bytes] = []
+
+        async def consume() -> None:
+            async for frame in audio_in.frames():
+                received.append(frame)
+                if len(received) >= 5:
+                    return
+
+        await pbx.hold_line()
+        await asyncio.wait_for(consume(), timeout=5.0)
+
+        assert channel.inbound_arrival_mean_ms is not None, "arrivals were never timed"
+        assert channel.inbound_dwell_mean_ms is not None, "queue dwell was never timed"
+        assert channel.inbound_arrival_max_ms >= channel.inbound_arrival_mean_ms
+        assert channel.inbound_dwell_max_ms >= channel.inbound_dwell_mean_ms
     finally:
         await channel.close()

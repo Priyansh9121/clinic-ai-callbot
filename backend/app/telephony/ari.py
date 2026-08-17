@@ -281,6 +281,32 @@ class AriClient:
         )
         return str(response.json()["id"])
 
+    async def channel_variable(self, channel_id: str, variable: str) -> str | None:
+        """Read one channel variable. Returns None rather than raising.
+
+        The ARI channel object carries no format information at all, so the
+        only way to ask what Asterisk actually negotiated is the CHANNEL()
+        dialplan function — ``audioreadformat``, ``audiowriteformat`` and
+        ``audionativeformat``.
+
+        Diagnostic only, so a failure here must never affect a call: an older
+        Asterisk that does not expose a field answers 404, and that is not
+        worth an exception on the call-setup path.
+        """
+        try:
+            response = await self._request(
+                "GET", f"/channels/{channel_id}/variable", params={"variable": variable}
+            )
+        except AriError:
+            return None
+        value = response.json().get("value")
+        return str(value) if value not in (None, "") else None
+
+    async def bridge(self, bridge_id: str) -> dict[str, Any]:
+        """Fetch a bridge. ``technology`` distinguishes native from transcoding."""
+        response = await self._request("GET", f"/bridges/{bridge_id}")
+        return dict(response.json())
+
     async def get_json(self, path: str) -> Any:
         """GET an ARI resource. For diagnostics and the live test suite."""
         response = await self._request("GET", path)

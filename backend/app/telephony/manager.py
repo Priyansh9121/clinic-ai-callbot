@@ -259,6 +259,14 @@ class CallSession:
             tts_first_audio_ms=round(getattr(stats, "tts_first_audio_ms", 0.0)),
             acknowledged=getattr(stats, "acknowledged", False),
             to_first_audio_ms=round(to_first_audio),
+            # Inbound side. endpoint_ms is timed from when our VAD saw silence,
+            # which is dwell_ms after the caller actually stopped talking — so
+            # a slow-looking endpointer and a bursty transport are told apart
+            # here rather than guessed at.
+            in_arrival_mean_ms=_ms(self._channel.inbound_arrival_mean_ms),
+            in_arrival_max_ms=_ms(self._channel.inbound_arrival_max_ms),
+            in_dwell_mean_ms=_ms(self._channel.inbound_dwell_mean_ms),
+            in_dwell_max_ms=_ms(self._channel.inbound_dwell_max_ms),
             wire_ms=round(wire_ms) if wire_ms is not None else None,
             to_wire_ms=round(to_first_audio + wire_ms) if wire_ms is not None else None,
         )
@@ -366,6 +374,11 @@ class CallSession:
             duration_s=round(self._stats.duration_seconds, 1),
             transferred=self._stats.transferred,
         )
+
+
+def _ms(value: float | None) -> float | None:
+    """Round a millisecond reading for logging, preserving None."""
+    return round(value, 1) if value is not None else None
 
 
 async def _suppress(coro: Awaitable[None]) -> None:

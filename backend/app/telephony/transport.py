@@ -223,7 +223,9 @@ class AudioSocketChannel:
         self._call_id = call_id
         self._format = wire_format
 
-        self._inbound: asyncio.Queue[bytes] = asyncio.Queue(maxsize=inbound_frames)
+        # Carries (enqueued_at, frame). The timestamp is internal: frames()
+        # still yields bare bytes, so nothing above this class changes.
+        self._inbound: asyncio.Queue[tuple[float, bytes]] = asyncio.Queue(maxsize=inbound_frames)
         self._outbound: asyncio.Queue[bytes] = asyncio.Queue(maxsize=outbound_frames)
         self._pending = bytearray()  # partial canonical frame from the wire
         self._outbound_pending = bytearray()  # partial wire frame awaiting a full 20 ms
@@ -249,6 +251,21 @@ class AudioSocketChannel:
         #: resampler batching, the outbound queue and the pacer — which no
         #: measurement above this layer can see.
         self._reply_started_at: float | None = None
+        #: Inbound arrival cadence, measured per decoded wire frame. A phone
+        #: line delivers 20 ms every 20 ms; batching shows up here as a mean
+        #: far below 20 or an outlying max, and distinguishes a slow endpointer
+        #: from a transport handing it audio in bursts.
+        self._last_wire_frame_at: float | None = None
+        self._arrival_count = 0
+        self._arrival_total_ms = 0.0
+        self._arrival_max_ms = 0.0
+        #: How long a canonical frame waits between being decoded off the
+        #: socket and the voice session taking it. endpoint_latency_ms is timed
+        #: from when the VAD saw silence, which is this much after the caller
+        #: actually stopped.
+        self._dwell_count = 0
+        self._dwell_total_ms = 0.0
+        self._dwell_max_ms = 0.0
         #: Milliseconds from first audio in to first byte on the wire, for the
         #: most recent reply. None until a reply has been sent.
         self.last_reply_wire_latency_ms: float | None = None
@@ -281,6 +298,29 @@ class AudioSocketChannel:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def inbound_arrival_mean_ms(self) -> float | None:
+        """Mean gap between decoded inbound wire frames. ~20 ms on a real line."""
+        if not self._arrival_count:
+            return None
+        return self._arrival_total_ms / self._arrival_count
+
+    @property
+    def inbound_arrival_max_ms(self) -> float | None:
+        """Largest gap seen. A high max with a low mean is bursty delivery."""
+        return self._arrival_max_ms if self._arrival_count else None
+
+    @property
+    def inbound_dwell_mean_ms(self) -> float | None:
+        """Mean socket-to-consumer wait. Time the endpointer is behind by."""
+        if not self._dwell_count:
+            return None
+        return self._dwell_total_ms / self._dwell_count
+
+    @property
+    def inbound_dwell_max_ms(self) -> float | None:
+        return self._dwell_max_ms if self._dwell_count else None
 
     @property
     def is_sending(self) -> bool:
@@ -426,6 +466,14 @@ class AudioSocketChannel:
                 "telephony.audio_frame_truncated", call_id=self._call_id, bytes=len(payload)
             )
             return
+        now = time.monotonic()
+        if self._last_wire_frame_at is not None:
+            gap_ms = (now - self._last_wire_frame_at) * 1000
+            self._arrival_count += 1
+            self._arrival_total_ms += gap_ms
+            self._arrival_max_ms = max(self._arrival_max_ms, gap_ms)
+        self._last_wire_frame_at = now
+
         pcm = self._up.convert(self._format.to_pcm16(payload))
         if not pcm:
             return
@@ -443,7 +491,7 @@ class AudioSocketChannel:
                 self.overruns += 1
                 metrics.increment(M.TELEPHONY_AUDIO_OVERRUN)
             with contextlib.suppress(asyncio.QueueFull):
-                self._inbound.put_nowait(frame)
+                self._inbound.put_nowait((time.monotonic(), frame))
 
     def stop_input(self) -> None:
         """Stop delivering frames without closing the socket.
@@ -460,13 +508,18 @@ class AudioSocketChannel:
         """Canonical 20 ms frames until the call's media ends."""
         while self._input_open and (self._running or not self._inbound.empty()):
             try:
-                yield await asyncio.wait_for(self._inbound.get(), timeout=0.05)
+                enqueued_at, frame = await asyncio.wait_for(self._inbound.get(), timeout=0.05)
             except TimeoutError:
                 if self._closed.is_set() and self._inbound.empty():
                     return
                 continue
+            dwell_ms = (time.monotonic() - enqueued_at) * 1000
+            self._dwell_count += 1
+            self._dwell_total_ms += dwell_ms
+            self._dwell_max_ms = max(self._dwell_max_ms, dwell_ms)
             if not self._input_open:
                 return
+            yield frame
 
     # --- Outbound ----------------------------------------------------------
     async def send(self, pcm: bytes) -> None:
