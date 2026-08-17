@@ -51,6 +51,7 @@ from app.voice.factory import session_config  # noqa: E402
 from app.voice.session import VoiceSession  # noqa: E402
 
 BOLD, DIM, GREEN, YELLOW, RESET = "\033[1m", "\033[2m", "\033[32m", "\033[33m", "\033[0m"
+RED = "\033[31m"
 
 #: Scripted caller turns. Synthetic clinic phrases — no real caller audio.
 TURNS: list[str] = [
@@ -59,6 +60,22 @@ TURNS: list[str] = [
     "Hughes",
     "fourteen March nineteen fifty eight",
     "a standard appointment",
+]
+
+
+#: Utterances with long *internal* pauses — the ones a silence-only endpointer
+#: cuts in half. Each entry is the segments a caller says with real gaps
+#: between them, and the gap in milliseconds. These are not edge cases: they
+#: are exactly what identity and date-of-birth collection produce on every
+#: booking, which is when being cut off is most expensive.
+HARD_TURNS: list[tuple[str, list[str], int]] = [
+    ("trailing hesitation", ["I need an appointment with", "um", "Doctor Patel"], 700),
+    ("mid-sentence pause", ["I was wondering if", "you had anything Friday"], 600),
+    ("spelled surname", ["N", "G", "U", "Y", "E", "N"], 400),
+    ("spelled surname slow", ["H", "U", "G", "H", "E", "S"], 550),
+    ("date of birth", ["fourteen March", "nineteen", "fifty eight"], 500),
+    ("mobile number", ["zero four one two", "three four five", "six seven eight"], 500),
+    ("thinking aloud", ["let me see", "Thursday would be better"], 800),
 ]
 
 
@@ -197,6 +214,58 @@ async def render_turns(tts, texts: list[str]) -> list[bytes]:  # noqa: ANN001
     return rendered
 
 
+async def render_hard_turns(tts) -> list[tuple[str, bytes, int]]:  # noqa: ANN001
+    """Render each hard case as speech with real silence between its segments."""
+    rendered = []
+    for label, segments, gap_ms in HARD_TURNS:
+        parts = [await tts.synthesize(segment) for segment in segments]
+        joined = audio_utils.silence(gap_ms).join(parts)
+        rendered.append((label, joined, gap_ms))
+    return rendered
+
+
+async def sweep_hard_endpointing(vad, cases: list[tuple[str, bytes, int]]) -> None:  # noqa: ANN001
+    """How often each threshold cuts an utterance that pauses mid-way.
+
+    The failure that matters is not latency, it is being cut off. A caller
+    spelling a surname or reading a date of birth pauses for longer than any
+    fixed end-of-turn silence worth using, so a silence-only endpointer must
+    either wait for the slowest speller or split the fastest one. This reports
+    which, per threshold.
+    """
+    print(f"\n{BOLD}Endpointing on utterances that pause mid-way{RESET}")
+    print(f"  {DIM}splits = fired before the caller had finished{RESET}")
+    thresholds = (250, 300, 400, 500, 700, 900)
+    print(f"  {DIM}{'case':<22}{'gap':>6}  " + "".join(f"{t:>7}" for t in thresholds) + f"{RESET}")
+    totals = dict.fromkeys(thresholds, 0)
+    for label, utterance, gap_ms in cases:
+        row = ""
+        for threshold in thresholds:
+            vad.reset()
+            endpointer = Endpointer(EndpointConfig(end_silence_ms=threshold, min_speech_ms=100))
+            stream = audio_utils.silence(300) + utterance + audio_utils.silence(1500)
+            speech_end_ms = 300 + audio_utils.duration_ms(utterance)
+            splits = 0
+            for index, frame in enumerate(audio_utils.iter_frames(stream)):
+                elapsed_ms = (index + 1) * 20
+                event = vad.process_frame(frame)
+                endpoint = endpointer.process(event, is_speech=bool(vad.is_speaking))
+                if endpoint is not None:
+                    # Fired while the caller still had more to say.
+                    if elapsed_ms < speech_end_ms - 100:
+                        splits += 1
+                    endpointer.reset()
+            totals[threshold] += splits
+            colour = GREEN if splits == 0 else RED
+            row += f"{colour}{splits:>7}{RESET}"
+        print(f"  {label:<22}{gap_ms:>5}ms  {row}")
+    print(f"  {DIM}{'TOTAL SPLITS':<22}{'':>7}" + RESET, end="")
+    for threshold in thresholds:
+        colour = GREEN if totals[threshold] == 0 else RED
+        print(f"{colour}{totals[threshold]:>7}{RESET}", end="")
+    print()
+
+
 async def measure_vad(vad, utterances: list[bytes]) -> tuple[list[float], list[float]]:  # noqa: ANN001
     """Speech-start detection lag and endpoint lag, in isolation."""
     starts: list[float] = []
@@ -321,6 +390,7 @@ async def main() -> int:
 
     if args.sweep_endpointing:
         await sweep_endpointing(vad, utterances)
+        await sweep_hard_endpointing(vad, await render_hard_turns(tts))
 
     print(f"\n{BOLD}STT ({settings.stt_model}){RESET}")
     stt_latencies = []
