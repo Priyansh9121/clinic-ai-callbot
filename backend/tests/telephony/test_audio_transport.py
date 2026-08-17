@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from app.speech import audio as audio_utils
-from app.speech.providers import FRAME_BYTES
+from app.speech.providers import FRAME_BYTES, FRAME_MS
 from app.telephony.audiosocket import (
     HEADER_BYTES,
     MAX_REASONABLE_AUDIO_BYTES,
@@ -472,5 +472,64 @@ async def test_the_transport_records_inbound_arrival_and_dwell(pbx: FakeAsterisk
         assert channel.inbound_dwell_mean_ms is not None, "queue dwell was never timed"
         assert channel.inbound_arrival_max_ms >= channel.inbound_arrival_mean_ms
         assert channel.inbound_dwell_max_ms >= channel.inbound_dwell_mean_ms
+    finally:
+        await channel.close()
+
+
+async def test_a_reply_longer_than_the_queue_arrives_complete(pbx: FakeAsterisk) -> None:
+    """The greeting was being truncated on every call, including the good ones.
+
+    Piper synthesises at roughly 30x real time; the pacer drains one 20 ms
+    frame every 20 ms. Any reply longer than the queue holds therefore overran
+    it, and the old policy dropped the overflow — which is why every live call
+    logged telephony.outbound_full three times during the greeting.
+
+    A bigger queue only moves the threshold, because the rates differ by 30x.
+    Backpressure holds at any length.
+    """
+    channel = await pbx.connect()
+    await channel.start()
+    try:
+        audio_out = AudioSocketOutput(channel)
+        # Comfortably more than DEFAULT_OUTBOUND_FRAMES (250 frames = 5 s).
+        spoken_ms = 8_000
+        await audio_out.play(audio_utils.silence(spoken_ms))
+        await asyncio.wait_for(audio_out.wait_until_drained(), timeout=30.0)
+        await asyncio.sleep(0.1)
+
+        expected = spoken_ms / FRAME_MS
+        # Every frame synthesised reached the wire. Allow a frame either side
+        # for the resampler's tail landing on a boundary.
+        assert pbx.received_ms >= spoken_ms - FRAME_MS, (
+            f"reply truncated: sent {spoken_ms} ms, wire saw {pbx.received_ms} ms"
+        )
+        assert channel.outbound_frames_sent >= expected - 1
+    finally:
+        await channel.close()
+
+
+async def test_barge_in_still_abandons_a_reply_held_by_backpressure(
+    pbx: FakeAsterisk,
+) -> None:
+    """Backpressure must not turn a superseded reply into queued audio.
+
+    A synthesiser parked on a full queue wakes when the pacer drains. If it
+    simply carried on, the abandoned reply would be queued behind the new
+    turn's audio and the caller would hear the answer they interrupted.
+    """
+    channel = await pbx.connect()
+    await channel.start()
+    try:
+        audio_out = AudioSocketOutput(channel)
+        long_reply = asyncio.create_task(audio_out.play(audio_utils.silence(8_000)))
+        await asyncio.sleep(0.2)  # let it fill the queue and park
+
+        await audio_out.stop_immediately()
+        await asyncio.wait_for(long_reply, timeout=10.0)
+        await asyncio.sleep(0.1)
+
+        # Whatever the pacer already wrote is gone for good; nothing more of
+        # the abandoned reply may be waiting behind it.
+        assert channel.pending_outbound_frames == 0, "the abandoned reply was queued after barge-in"
     finally:
         await channel.close()

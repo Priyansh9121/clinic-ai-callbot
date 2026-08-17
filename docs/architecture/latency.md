@@ -111,3 +111,37 @@ instrumentation later does not mean renaming anything.
 
 Label values are restricted to closed sets (intent, outcome, reason code).
 Never a patient identifier, a phone number or free text.
+
+
+## Measured over a real telephone call
+
+Milestone 4, six completed turns, inbound SIP to extension 700 against Asterisk
+20.6.0. Read from `telephony.turn_latency`.
+
+| Stage | Median |
+|---|---|
+| Endpointing | 466 ms |
+| STT | 466 ms |
+| Engine — deterministic | 19 ms |
+| Engine — LLM | 2145–3826 ms (behind the acknowledgement) |
+| TTS to first audio | 176 ms |
+| Transport to the wire | 1.5 ms |
+| **Speech end → first byte on the wire** | **1128 ms** (1065–1155) |
+
+**The telephone did not move the number.** 1135 ms measured locally over a
+microphone was a floor and the phone came in at 1128 ms. The prediction that
+soxr batching would add ~100–150 ms was wrong by two orders of magnitude: the
+whole transport — resampler, outbound queue and pacer — costs 1.5 ms.
+
+So the budget gap is where it always was, and no telephony work will close it:
+endpointing (466 ms) plus transcription (466 ms) is 932 ms before the first
+word is known. The engine is bimodal and the acknowledgement already covers the
+LLM's 2–4 s, which is why the median does not move with it.
+
+What this rules out as the next optimisation: the transport, the pacer, the
+resampler, and the SIP leg. What it leaves: endpointing thresholds, and a
+streaming STT decoder. Measure before changing either.
+
+`to_wire_ms` is the honest end of this measurement. Asterisk's own buffering,
+the network and the handset's jitter buffer are past the socket and were not
+measured; the caller's perceived latency is this plus that.

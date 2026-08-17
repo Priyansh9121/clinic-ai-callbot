@@ -36,6 +36,11 @@ from app.llm.provider import LLMAnalysis
 
 logger = get_logger(__name__)
 
+#: Cold model loads take far longer than a turn may. The per-turn timeout is
+#: short because a caller is waiting; at warmup nobody is, and timing out here
+#: left the first caller paying the load this exists to avoid.
+WARMUP_TIMEOUT_SECONDS = 120.0
+
 #: Hard ceiling on the response body. Model output is untrusted input, and a
 #: runaway generation must not be parsed at all.
 MAX_RESPONSE_BYTES = 16_384
@@ -207,9 +212,27 @@ class OllamaLLMProvider:
         The first generation after a cold start costs seconds while weights are
         loaded. Doing that here means a caller does not pay for it. The input
         is fixed synthetic text — never anything from a real call.
+
+        Uses its own timeout rather than the per-turn one. A turn is bounded at
+        LLM_TIMEOUT_SECONDS (3 s by default) because a caller is waiting; a
+        cold load takes longer than that, so the warmup timed out on every
+        start-up — logging `llm.warmup_failed` with LLMTimeoutError and then
+        leaving the first real caller to pay for the load anyway, which is
+        exactly what it exists to prevent. Nobody is on the line here.
         """
         try:
-            await self.analyse_message("I need an appointment tomorrow", state="IDENTIFY_INTENT")
+            async with asyncio.timeout(WARMUP_TIMEOUT_SECONDS):
+                await self._client.post(
+                    "/api/chat",
+                    json={
+                        "model": self._model,
+                        "messages": [{"role": "user", "content": "warmup"}],
+                        "stream": False,
+                        "keep_alive": self._keep_alive,
+                        "options": {"num_predict": 1},
+                    },
+                    timeout=WARMUP_TIMEOUT_SECONDS,
+                )
         except Exception as exc:
             logger.info("llm.warmup_failed", provider="ollama", error=type(exc).__name__)
             return False

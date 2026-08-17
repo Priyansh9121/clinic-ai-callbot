@@ -21,6 +21,7 @@ microphone paths build, from the same factories.
 from __future__ import annotations
 
 import contextlib
+import time
 from typing import TYPE_CHECKING, Any
 
 from app.clinic.factory import build_clinic_knowledge
@@ -117,6 +118,29 @@ class TelephonyVoiceFactory:
         self._open[id(voice)] = db
         return voice
 
+    async def preload(self) -> None:
+        """Load the speech models before the first caller does.
+
+        Both load lazily on first use — inside the event loop, on the first
+        turn of the first call. Measured on a cold call: Piper 860 ms and
+        Whisper 836 ms, during which inbound queue dwell peaked at 997 ms and
+        14 of 129 frames were dropped. The same call warm: 4.3 ms dwell, no
+        drops. The first caller was paying for the load in lost audio.
+
+        `health()` is the load — it is what calls `_ensure_model` /
+        `_ensure_voice` — and it swallows its own failures, so a missing model
+        file degrades to a slow first call rather than a failed start-up.
+        """
+        started = time.perf_counter()
+        stt_ok = await self._stt.health()
+        tts_ok = await self._tts.health()
+        logger.info(
+            "telephony.speech_preloaded",
+            stt=stt_ok,
+            tts=tts_ok,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+        )
+
     async def release(self, voice: object) -> None:
         """Close the database session a finished call was using."""
         db = self._open.pop(id(voice), None)
@@ -147,6 +171,10 @@ async def start_telephony(app_state: Any, settings: Settings) -> TelephonyServic
         service = build_telephony_service(settings=settings, voice_factory=factory)
         service.voice_factory_owner = factory  # type: ignore[attr-defined]
         await service.start()
+        # Awaited, not backgrounded: a call arriving in the first two seconds
+        # would otherwise still pay the load, which is the case this exists to
+        # prevent. It costs ~1.7 s of start-up and nobody is on the line yet.
+        await factory.preload()
     except Exception as exc:
         logger.error("telephony.start_failed", error=type(exc).__name__, detail=str(exc))
         return None

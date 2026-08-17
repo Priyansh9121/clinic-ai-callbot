@@ -286,8 +286,13 @@ Measured for the media transport in isolation, on loopback:
 | Inbound wire → canonical frame | one 20 ms frame, no added buffering |
 | Resampler filter delay (`HQ`, 8↔16 kHz) | ~66 ms each way; `QQ` is ~0.25 ms |
 
-**End-to-end call latency is not measured**, because it requires a live PBX. The
-Milestone 3 figure of 1135 ms from speech end to first agent audio is the
+**End-to-end call latency has now been measured** — 1128 ms median from speech
+end to first byte on the wire, over six turns on real calls. See
+docs/architecture/latency.md. The transport contributes 1.5 ms of that, so the
+phone did not meaningfully exceed the local floor.
+
+Superseded note, kept for the reasoning: the
+Milestone 3 figure of 1135 ms from speech end to first agent audio was the
 floor; a phone call adds the SIP leg, Asterisk's buffering, and the resampler's
 filter delay in both directions. Expect worse, and measure it on the real
 system before quoting a number.
@@ -456,3 +461,32 @@ uv run pytest -m telephony_live -q                 # needs a running PBX
 
 Local SIP setup, softphone configuration and the manual acceptance script:
 [`docs/development/local-sip.md`](../development/local-sip.md).
+
+
+## Media format negotiation
+
+`POST /channels` takes a `formats` parameter. **Omitting it is not a default —
+it is a delegation.** Asterisk then picks the best format the channel supports,
+and `chan_audiosocket` advertises every signed-linear rate up to `slin192`.
+
+The symptom is not an error. The socket simply delivers more bytes than it
+should: 384 kB/s where 16 kB/s was expected, so each 20 ms packet decodes as
+480 ms of audio, every duration derived from frame counts runs ~24x fast, and
+the endpointer declares six seconds of initial silence in about 250 ms of wall
+clock. The call hangs up on a caller who is still listening to the greeting.
+
+`originate_media_channel` therefore requires `media_format` rather than
+defaulting it — a caller that forgets it does not compile.
+
+`telephony.media_formats` logs what was actually negotiated, at two points
+(media-up and after bridging, because a bridge can renegotiate) with read,
+write and native formats as separate fields. They are never collapsed: the
+interesting failure is that they disagree.
+
+Confirmed on every live call after the fix: `read_format=slin`,
+`write_format=slin`, `agrees_with_request=True`, `simple_bridge`, inbound
+cadence 20.0 ms and `rate_ratio` 0.97–1.0.
+
+**The pre-fix negotiation was never directly observed.** The logging was added
+after the fix, so whether Asterisk had chosen `slin192` in one direction or
+both is unconfirmed. What is confirmed is that naming the format fixes it.

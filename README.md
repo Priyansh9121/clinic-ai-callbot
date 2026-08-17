@@ -6,22 +6,19 @@ callers to a human when it should, and redirects medical emergencies to Triple
 Zero — without letting a language model control anything clinical or
 transactional.
 
-> **Status: Milestones 1–3 complete; Milestone 4 implemented, awaiting manual
-> SIP acceptance.** The conversation engine, appointment engine, safety engine
+> **Status: Milestones 1–4 complete.** The conversation engine, appointment engine, safety engine
 > and APIs work end to end over text; a local LLM improves natural-language
 > understanding behind the same analyser interface; you can hold a spoken,
 > interruptible conversation through a local microphone; and a SIP telephony
 > transport makes a phone call behave like that same voice session. Everything
 > — speech recognition, synthesis and the language model — runs on the machine.
 >
-> The telephony transport **has** now run against a live Asterisk 20.6.0: SIP,
-> ARI, `Stasis(clinic-ai)`, bridging and the AudioSocket media leg all work on
-> a real call to extension 700, and the greeting is audible in the agent's
-> voice. **Two-way audio is not yet confirmed** — the return path was being
-> decoded as the wrong format, which is fixed but untested on a call. See
-> [Implementation status](#implementation-status);
-> [`docs/development/local-sip.md`](docs/development/local-sip.md) carries the
-> manual acceptance script and what it has covered so far.
+> **Milestone 4 is closed.** Two-way audio is confirmed on real calls to
+> extension 700 against Asterisk 20.6.0: six completed turns, the caller heard
+> and answered, with `read_format=slin` / `write_format=slin` at both media-up
+> and bridged on every call. Measured speech-end to first byte on the wire:
+> **1128 ms median**. See [Measured telephone latency](#measured-telephone-latency)
+> and [`docs/development/local-sip.md`](docs/development/local-sip.md).
 >
 > **All data in this repository is fictional.** "Riverside Medical Clinic", its
 > practitioners and its patients are synthetic development fixtures. This
@@ -180,7 +177,7 @@ pipeline runs unchanged.
 
 ```bash
 uv run python scripts/telephony_status.py       # config + PBX reachability
-cd backend && uv run pytest tests/telephony -q  # 141 tests, no Asterisk needed
+cd backend && uv run pytest tests/telephony -q  # 144 tests, no Asterisk needed
 uv run pytest -m telephony_live -q              # needs a running PBX
 ```
 
@@ -441,6 +438,40 @@ so a typical booking conversation makes ~5 model calls rather than one per turn.
 Architecture, failure handling, privacy boundary and benchmark method:
 [`docs/architecture/llm.md`](docs/architecture/llm.md).
 
+### Measured telephone latency
+
+Real inbound SIP calls to extension 700, Asterisk 20.6.0 in a UTM VM, Linphone
+on the Mac. Six completed turns. Read from `telephony.turn_latency`, which
+carries the whole breakdown on one line.
+
+| Stage | Median | Notes |
+|---|---|---|
+| Endpointing | 466 ms | silence after the caller stops, before the turn starts |
+| STT (Whisper `base.en`) | 466 ms | |
+| Engine — deterministic | 19 ms | |
+| Engine — with the LLM | 2145–3826 ms | hidden behind the acknowledgement |
+| TTS to first audio (Piper) | 176 ms | |
+| Transport to the wire | **1.5 ms** | resampler + queue + pacer |
+| **Speech end → first byte on the wire** | **1128 ms** (1065–1155) | against a 700 ms target |
+
+**The phone adds nothing measurable.** The 1135 ms measured locally over a
+microphone was a floor, and the SIP leg did not meaningfully exceed it. The
+transport costs ~1.5 ms — not the ~100–150 ms of soxr batching that was
+predicted — so the gap to target is endpointing plus transcription, exactly as
+it was locally, and a streaming STT decoder remains the only change that
+removes it rather than trading against it.
+
+Media format is negotiated correctly in both directions: `read_format=slin`,
+`write_format=slin`, `agrees_with_request=True`, at both media-up and after
+bridging, on every call, over a `simple_bridge`. Inbound cadence
+`in_arrival_mean_ms=20.0` and `rate_ratio` 0.97–1.0 — the wire delivers 20 ms
+of audio every 20 ms, which is what a phone line should do.
+
+Naming the format on the ARI originate is what fixed this; the format logging
+landed after the fix, so **the pre-fix negotiation was never directly
+observed** and the exact mechanism (whether Asterisk chose `slin192` in one
+direction or both) is recorded as unconfirmed rather than explained.
+
 ### Measured voice latency
 
 Apple M2, 8 GB. faster-whisper `base.en` (int8, CPU), Piper `en_GB-alan-medium`,
@@ -543,7 +574,7 @@ change is an explicit operational step, not a side effect of a restart.
 | 1 | Database, appointments, conversation engine, safety, text API, simulator, tests | **complete** |
 | 2 | Local LLM behind the analyser interface, strict validation, hint resolution, fallback, shadow mode, benchmark | **complete** |
 | 3 | STT, TTS, VAD, streaming audio, barge-in, latency metrics | **complete** |
-| 4 | Asterisk/PJSIP transport, ARI call control, AudioSocket media, transfer, call isolation | **implemented; a live call reaches the caller — inbound audio unconfirmed** |
+| 4 | Asterisk/PJSIP transport, ARI call control, AudioSocket media, transfer, call isolation | **complete — two-way audio confirmed on real calls** |
 | 4B | SIP trunk, Australian DID, PSTN cutover | not started (deployment step) |
 | 5 | OTP verification, staff dashboard, RBAC UI, load and red-team testing | partial (RBAC + audit trail exist) |
 
@@ -585,23 +616,22 @@ change is an explicit operational step, not a side effect of a restart.
   better-enunciated and noise-free compared with a real caller on a real line.
   Treat every accuracy figure as an upper bound. A clinic-recorded set, under
   consent, is needed before deployment.
-- **Two-way telephone audio is not yet confirmed.** On a real call to extension
-  700 against Asterisk 20.6.0, SIP registration, `Stasis(clinic-ai)`, bridge
-  creation, the originated AudioSocket leg and VM → Mac media connectivity all
-  work, and the greeting is audible in the agent's voice. The *return* path is
-  not proven: Asterisk was negotiating `slin192` for the media channel because
-  the originate did not name a format, so 20 ms of audio arrived looking like
-  480 ms and the session hung up on a caller who was still listening to the
-  greeting. Naming the format explicitly is committed and untested on a call.
-  Until one turn completes over the phone, §3 of the acceptance script onwards
-  is untested.
-- **End-to-end telephone latency is unmeasured.** The Milestone 3 figure of
-  1135 ms is the floor; a call adds the SIP leg, Asterisk buffering and
-  resampler filter delay in both directions. No end-to-end number is claimed.
+- **The agent interrupts itself on open speakers.** The microphone is
+  deliberately never gated on playback — that is what makes barge-in work — so
+  on Mac speakers the agent hears its own voice and barges in on itself.
+  Measured: **barge-in fired ~25 times in 28 seconds and no turn ever
+  completed.** Use headphones, or a handset. Acoustic echo cancellation is not
+  implemented; on a phone line the far-end echo profile is different again.
+- **The telephone latency target is missed by the same margin as the
+  microphone.** Measured 1128 ms median from speech end to first byte on the
+  wire against a 700 ms target. The phone adds nothing measurable: the
+  transport itself costs ~1.5 ms, and the SIP leg did not move the number. The
+  gap is endpointing plus transcription, exactly as it was locally.
 - **Telephony barge-in is measured only to the edge of our process.** Playback
   stops in under a millisecond and pacing bounds un-recallable audio to roughly
   one 20 ms frame, but what a caller *hears* also includes Asterisk and the
-  network. That needs a real call and a human ear.
+  network. Confirmed working by ear on a real call; not measured beyond the
+  socket.
 - **Barge-in on open speakers makes the agent interrupt itself.** The
   microphone is deliberately never gated on playback, so it hears the speaker.
   Use headphones, or raise `VOICE_BARGE_IN_FRAMES`. Acoustic echo cancellation

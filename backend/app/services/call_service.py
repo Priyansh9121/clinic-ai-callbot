@@ -121,6 +121,21 @@ class CallService:
     async def end_call(
         self, call: Call, session: ConversationSession, outcome: CallOutcome
     ) -> None:
+        """Close the call record. Runs once, however many times it is called.
+
+        Terminal states absorb further input rather than ending the session, so
+        a caller who keeps talking after being transferred produces more turns
+        — and `_persist` reached here on every one of them. Each repeat moved
+        `ended_at` later, wrote another CALL_ENDED event, and observed the
+        duration and turn histograms again, so a single transferred call could
+        contribute a dozen samples and drag the percentiles with it.
+
+        Guarded here rather than at the call site because there are two call
+        sites and only one of them checked.
+        """
+        if call.ended_at is not None:
+            logger.debug("call.already_ended", call_id=str(call.id))
+            return
         await self.sync_from_session(call, session, outcome=outcome)
         call.ended_at = utc_now()
         self.record_event(call.id, CallEventType.CALL_ENDED, {"outcome": outcome.value})

@@ -338,20 +338,32 @@ then the VM.
 
 # MANUAL SIP ACCEPTANCE
 
-**This cannot be automated and is only partly performed.** Placing a call,
-speaking into a handset and listening to the reply needs a human. Automated
-media tests and a human ear are different things, and the tests do not
-substitute for this.
+**This cannot be automated. §1–§3 and §7 are performed; the rest is not.**
+Placing a call, speaking into a handset and listening to the reply needs a
+human. Automated media tests and a human ear are different things.
 
-What has been confirmed on a real call to `700`, on Asterisk 20.6.0:
+Confirmed on real calls to `700`, Asterisk 20.6.0:
 
 - SIP registration, `Stasis(clinic-ai)`, bridge creation, the originated
-  AudioSocket leg and VM → Mac media connectivity all work.
-- The greeting was **audible in the agent's voice** — the outbound path is real.
+  AudioSocket leg and VM → Mac media connectivity.
+- **Two-way audio.** The greeting is audible in the agent's voice, the caller
+  is heard and answered — six completed turns.
+- Barge-in works by ear on a handset.
+- Media format negotiated correctly in both directions on every call:
+  `read_format=slin`, `write_format=slin`, `simple_bridge`, inbound cadence
+  20.0 ms.
+- Measured speech end → first byte on the wire: **1128 ms median**. Breakdown
+  in docs/architecture/latency.md.
 
-What has not: the caller being heard. The return path was still being decoded
-as the wrong format on every call so far (§1 below), so no turn has ever
-completed over the phone and everything from §3 onwards is untested.
+Still unperformed: §4–§6 and §8–§16 — booking end to end over the phone,
+reschedule, cancel, transfer, transfer failure, emergency wording, hangup
+handling, injection, concurrency, capacity and PBX failure.
+
+> **Use a handset or headphones, never open speakers.** The microphone is
+> deliberately not gated on playback, so on Mac speakers the agent hears its
+> own voice and barges in on itself. Measured: barge-in fired ~25 times in
+> 28 seconds and **no turn ever completed**. This looks exactly like a broken
+> VAD and is not one.
 
 Start the backend with telephony enabled, then work through the following.
 Record what actually happens, including anything that sounds wrong.

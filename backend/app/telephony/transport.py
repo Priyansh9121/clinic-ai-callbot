@@ -70,6 +70,13 @@ DEFAULT_OUTBOUND_FRAMES = 250
 #: pacing exists to prevent.
 _PACING_RESYNC_MS = 100
 
+#: Longest a synthesiser may be held back waiting for the pacer. Reaching this
+#: means the write loop has stopped draining — a dead socket or a wedged pacer
+#: — and blocking a turn forever is worse than losing the tail of one reply.
+#: Five seconds is far longer than the ~5 s the queue itself holds, so a
+#: healthy call never comes near it.
+OUTBOUND_BACKPRESSURE_TIMEOUT_S = 5.0
+
 
 class TelephonyFormat(StrEnum):
     """Wire format of the media leg.
@@ -251,6 +258,11 @@ class AudioSocketChannel:
         #: resampler batching, the outbound queue and the pacer — which no
         #: measurement above this layer can see.
         self._reply_started_at: float | None = None
+        #: Bumped by discard_outbound(). A synthesiser parked on a full queue
+        #: checks it on the way out: if barge-in happened while it waited, the
+        #: rest of that reply is stale and must not be queued behind the new
+        #: turn's audio.
+        self._outbound_generation = 0
         #: Inbound arrival cadence, measured per decoded wire frame. A phone
         #: line delivers 20 ms every 20 ms; batching shows up here as a mean
         #: far below 20 or an outlying max, and distinguishes a slow endpointer
@@ -291,6 +303,15 @@ class AudioSocketChannel:
     def call_id(self) -> str:
         return self._call_id
 
+    def adopt_call_id(self, call_id: str) -> None:
+        """Name this socket once it has been matched to a call.
+
+        The channel is constructed before its UUID frame arrives, so it starts
+        as "pending" — and stayed that way, which meant the one line carrying
+        rate_ratio and overruns could not be tied to the call it described.
+        """
+        self._call_id = call_id
+
     @property
     def peer_uuid(self) -> str | None:
         return self._peer_uuid
@@ -299,9 +320,32 @@ class AudioSocketChannel:
     def is_running(self) -> bool:
         return self._running
 
+    def reset_inbound_stats(self) -> None:
+        """Start a fresh measurement window.
+
+        Called at each turn boundary, so the readings describe that turn rather
+        than a running mean since the call was answered — which is what they
+        were, and which flattened exactly the spike worth seeing: a cold first
+        turn blocking the loop on model loading disappears into the average by
+        the third turn.
+
+        The inter-arrival clock is deliberately not reset. Zeroing it would
+        make the first gap of each window the time since the last turn ended
+        rather than a frame interval, which is not a cadence measurement.
+        """
+        self._arrival_count = 0
+        self._arrival_total_ms = 0.0
+        self._arrival_max_ms = 0.0
+        self._dwell_count = 0
+        self._dwell_total_ms = 0.0
+        self._dwell_max_ms = 0.0
+
     @property
     def inbound_arrival_mean_ms(self) -> float | None:
-        """Mean gap between decoded inbound wire frames. ~20 ms on a real line."""
+        """Mean gap between decoded inbound wire frames, this window.
+
+        ~20 ms on a real line. A low mean with an outlying max is batching.
+        """
         if not self._arrival_count:
             return None
         return self._arrival_total_ms / self._arrival_count
@@ -321,6 +365,11 @@ class AudioSocketChannel:
     @property
     def inbound_dwell_max_ms(self) -> float | None:
         return self._dwell_max_ms if self._dwell_count else None
+
+    @property
+    def pending_outbound_frames(self) -> int:
+        """Frames queued but not yet transmitted. Zero after barge-in."""
+        return self._outbound.qsize()
 
     @property
     def is_sending(self) -> bool:
@@ -541,10 +590,31 @@ class AudioSocketChannel:
         if self._drained.is_set():
             self._reply_started_at = time.monotonic()
         self._drained.clear()
-        self._enqueue_wire(self._format.from_pcm16(self._down.convert(pcm)))
+        await self._enqueue_wire(self._format.from_pcm16(self._down.convert(pcm)))
 
-    def _enqueue_wire(self, wire: bytes, *, pad_final: bool = False) -> None:
-        """Cut wire-format bytes into exact 20 ms frames and queue them."""
+    async def _enqueue_wire(self, wire: bytes, *, pad_final: bool = False) -> None:
+        """Cut wire-format bytes into exact 20 ms frames and queue them.
+
+        Waits for the pacer when the queue is full rather than dropping.
+
+        Dropping was the original policy and it is right for exactly one case:
+        a reply abandoned by barge-in, where the audio is stale and the caller
+        must not hear it. It was wrong for the ordinary case. Piper synthesises
+        at roughly 30x real time while the pacer drains one 20 ms frame every
+        20 ms, so any reply longer than the queue holds — about five seconds —
+        overruns it. Every call logged `telephony.outbound_full` three times
+        during the greeting alone: the greeting was being truncated on the
+        floor on every single call, including the successful ones.
+
+        A bigger queue would only move the threshold; the rates differ by 30x,
+        so any fixed size is overrun by a long enough reply. Backpressure fixes
+        it at any length, and costs nothing on a reply that fits.
+
+        This does not weaken barge-in. `discard_outbound` bumps a generation
+        counter, so a synthesiser parked here wakes, sees the reply it was
+        feeding is abandoned, and clears rather than queueing the rest behind
+        the new turn.
+        """
         if wire:
             self._outbound_pending.extend(wire)
         frame_bytes = self._format.frame_bytes
@@ -552,21 +622,43 @@ class AudioSocketChannel:
             shortfall = -len(self._outbound_pending) % frame_bytes
             if shortfall:
                 self._outbound_pending.extend(self._format.from_pcm16(b"\x00" * shortfall))
+        generation = self._outbound_generation
         while len(self._outbound_pending) >= frame_bytes:
+            if self._outbound_generation != generation or not self._running:
+                self._outbound_pending.clear()
+                return
             frame = bytes(self._outbound_pending[:frame_bytes])
             del self._outbound_pending[:frame_bytes]
             try:
                 self._outbound.put_nowait(frame)
+                continue
             except asyncio.QueueFull:
-                # Never block the conversation on the wire. Dropping the tail
-                # of an over-long reply is better than stalling the turn.
+                pass
+            try:
+                await asyncio.wait_for(
+                    self._outbound.put(frame), timeout=OUTBOUND_BACKPRESSURE_TIMEOUT_S
+                )
+            except TimeoutError:
+                # The pacer has stopped draining. Blocking the turn forever is
+                # worse than losing the tail of one reply, so the old policy
+                # applies here and only here.
                 metrics.increment(M.TELEPHONY_AUDIO_OVERRUN)
-                logger.warning("telephony.outbound_full", call_id=self._call_id)
+                logger.warning(
+                    "telephony.outbound_stalled",
+                    call_id=self._call_id,
+                    waited_s=OUTBOUND_BACKPRESSURE_TIMEOUT_S,
+                )
+                self._outbound_pending.clear()
+                return
+            if self._outbound_generation != generation or not self._running:
+                # Barge-in landed while we were parked. The frame just queued
+                # belongs to the abandoned reply, so clear it out again.
+                self.discard_outbound()
                 return
 
-    def flush_outbound(self) -> None:
+    async def flush_outbound(self) -> None:
         """Push the resampler's held-back tail out. Ends one utterance."""
-        self._enqueue_wire(self._format.from_pcm16(self._down.flush()), pad_final=True)
+        await self._enqueue_wire(self._format.from_pcm16(self._down.flush()), pad_final=True)
 
     async def _write_loop(self) -> None:
         """Meter outbound frames at real time — one 20 ms frame per 20 ms."""
@@ -626,6 +718,7 @@ class AudioSocketChannel:
         is precisely why the pacer never runs ahead by more than a frame.
         """
         dropped = 0
+        self._outbound_generation += 1
         while True:
             try:
                 self._outbound.get_nowait()
@@ -655,7 +748,7 @@ class AudioSocketChannel:
         return self._peer_uuid
 
     async def wait_drained(self) -> None:
-        self.flush_outbound()
+        await self.flush_outbound()
         await self._drained.wait()
 
     def _notify_hangup(self) -> None:

@@ -380,6 +380,9 @@ class TelephonyService:
             metrics.increment(M.TELEPHONY_MEDIA_ERROR, labels={"kind": "unmatched"})
             await channel.close(notify_peer=True)
             return
+        # From here the socket belongs to a known call, so its logs should say
+        # which one rather than "pending".
+        channel.adopt_call_id(pending.call_id)
         if not pending.media.done():
             pending.media.set_result(channel)
         # Hold the connection open until the call is over — the media server
