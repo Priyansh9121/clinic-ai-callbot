@@ -542,7 +542,68 @@ genuine streaming, not a growing buffer.
 caller stops is one final chunk step — on the order of tens of milliseconds
 rather than the 466 ms base.en spends today.
 
-**Unresolved before this can be adopted:** the sherpa re-export ships no
-LICENSE file. The upstream NeMo model is NVIDIA's and is normally CC-BY-4.0,
-but the re-export does not say so, and an unstated licence is not a permissive
-one. That needs settling before any integration.
+**Rejected on licence.** Settled at the source rather than the mirror:
+csukuangfj cannot add or remove terms from NVIDIA's weights, so the binding
+licence is NVIDIA's. NGC states, for
+`stt_en_fastconformer_hybrid_large_streaming_80ms`:
+
+> License to use this model is covered by the NGC TERMS OF USE unless another
+> License/Terms Of Use/EULA is clearly specified.
+
+No permissive licence is clearly specified, so it falls back to NVIDIA's
+platform terms. Note that the sibling
+`nvidia/stt_en_fastconformer_hybrid_large_streaming_multi` *does* declare
+`cc-by-4.0` on Hugging Face — which is exactly why this needed checking per
+model rather than per family. Assuming CC-BY flowed across from the sibling
+would have been wrong.
+
+Recorded here so it is not re-litigated: the model is technically suitable and
+legally unavailable to us on its stated terms.
+
+### Streaming Zipformer (Apache-2.0) — measured, rejected on telephone audio
+
+`csukuangfj/sherpa-onnx-streaming-zipformer-en-2023-06-26`, **Apache-2.0**,
+decoded by `sherpa-onnx` (also Apache-2.0). Cache-aware and genuinely
+streaming.
+
+Everything about the shape of it is right:
+
+| | |
+|---|---|
+| Disk (int8, all three) | **69 MB** — smaller than base.en |
+| RSS, encoder+decoder+joiner | **~175 MB** |
+| **Post-speech-end** | **21.6 ms** median, 44.3 ms p95 |
+| During speech (overlapped, free) | 113 ms |
+| base.en one-shot, same clips | 438 ms |
+
+21.6 ms would clear the <150 ms target by a factor of seven.
+
+**It fails on telephone audio.** The same utterance, clean versus through
+16 k → 8 k → G.711 → 16 k:
+
+| spoken | clean | telephone band |
+|---|---|---|
+| "I'm having chest pain and I can't breathe" | "I'M HAVING CHEST PAIN AND I CAN'T BREATHE" | **"THREE"** |
+| "he's unconscious and not responding" | "IS UNCONSCIOUS AND NOT RESPOND" | **(empty)** |
+| "the name is Siobhan" | "THE NAME IS CHIVAL" | **(empty)** |
+
+The clean column proves the harness is correct, so this is the model. It was
+trained on LibriSpeech-style wideband audio with no telephony augmentation;
+Whisper's training set includes telephone-band speech, which is why base.en
+survives the same codec path.
+
+**Safety keywords are dropped entirely** — "can't breathe" and "unconscious"
+both vanish. By the deciding metric (safety-keyword survival first, WER
+second) this is the worst possible failure, and no latency number redeems it.
+Rejected.
+
+### English-only is a ceiling, not a detail
+
+Both streaming candidates are English-only, as is `base.en`, so nothing changes
+today. But it forecloses the multilingual path this product will need: a clinic
+serving a migrant population cannot run an English-only recogniser, and the
+identity failures already measured (Nguyen, Siobhan, Ranpura) are concentrated
+in exactly that population. Whisper large-v3-turbo is the only measured
+candidate that is both multilingual and materially better on those names — and
+it is 13x too slow on this hardware. That combination is the real constraint on
+this milestone, and it is a hardware problem before it is a model problem.
