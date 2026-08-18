@@ -305,6 +305,7 @@ rules, the latency budget and the
 | [operations/configuration.md](docs/operations/configuration.md) | which of the four stores owns each setting, and the one real overlap |
 | [operations/backup-recovery.md](docs/operations/backup-recovery.md) | verified PostgreSQL dump/restore drill, what is deliberately not backed up |
 | [architecture/slot-booking.md](docs/architecture/slot-booking.md) | why booking is optimistic and `SlotStatus.HELD` is unused |
+| [architecture/domain-packs.md](docs/architecture/domain-packs.md) | analysis: what is clinic-specific vs generic, and what could not be made declarative |
 | [telephony/sip-trunk.md](docs/telephony/sip-trunk.md) | how a real phone number would connect. Design only — no trunk exists |
 | [security/safety-engine.md](docs/security/safety-engine.md) | the deterministic emergency path |
 | [privacy/data-inventory.md](docs/privacy/data-inventory.md) | what is stored, what is logged, what is not |
