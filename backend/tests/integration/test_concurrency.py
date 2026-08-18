@@ -49,6 +49,7 @@ async def test_two_callers_racing_for_one_slot_produce_exactly_one_booking(
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["hughes"].id,
                 slot_id=slot_id,
+                is_new_patient=False,
             ),
         ),
         _book_in_new_session(
@@ -58,6 +59,7 @@ async def test_two_callers_racing_for_one_slot_produce_exactly_one_booking(
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["nguyen"].id,
                 slot_id=slot_id,
+                is_new_patient=False,
             ),
         ),
     )
@@ -103,6 +105,7 @@ async def test_many_callers_racing_for_one_slot(
                     clinic_id=clinic_data.clinic.id,
                     patient_id=patients[i % len(patients)],
                     slot_id=slot_id,
+                    is_new_patient=False,
                 ),
             )
             for i in range(contenders)
@@ -133,6 +136,7 @@ async def test_concurrent_retries_with_one_idempotency_key_book_once(
         clinic_id=clinic_data.clinic.id,
         patient_id=clinic_data.patients["hughes"].id,
         slot_id=slots[0].id,
+        is_new_patient=False,
         idempotency_key="concurrent-retry-key",
     )
 
@@ -176,6 +180,7 @@ async def test_different_slots_book_concurrently_without_interference(
                     clinic_id=clinic_data.clinic.id,
                     patient_id=clinic_data.patients["hughes"].id,
                     slot_id=slot.id,
+                    is_new_patient=False,
                 ),
             )
             for slot in chosen
@@ -220,6 +225,7 @@ async def test_a_patient_cannot_be_double_booked_at_the_same_time(
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["hughes"].id,
                 slot_id=patel[0].id,
+                is_new_patient=False,
             ),
         ),
         _book_in_new_session(
@@ -229,6 +235,7 @@ async def test_a_patient_cannot_be_double_booked_at_the_same_time(
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["hughes"].id,
                 slot_id=same_time.id,
+                is_new_patient=False,
             ),
         ),
     )
@@ -279,6 +286,7 @@ async def test_the_caller_who_loses_the_race_is_offered_alternatives(
             clinic_id=clinic_data.clinic.id,
             patient_id=other.id,
             slot_id=contested,
+            is_new_patient=False,
             source=BookingSource.RECEPTION,
         )
     )

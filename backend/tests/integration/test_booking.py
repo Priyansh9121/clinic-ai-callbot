@@ -39,6 +39,7 @@ async def test_booking_commits_and_consumes_the_slot(db, clinic_data, settings) 
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
 
@@ -66,6 +67,7 @@ async def test_booking_is_visible_in_a_separate_session(
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
 
@@ -82,6 +84,7 @@ async def test_booking_writes_an_audit_event(db, clinic_data, settings) -> None:
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
 
@@ -109,6 +112,7 @@ async def test_double_booking_the_same_slot_is_refused(db, clinic_data, settings
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
 
@@ -118,6 +122,7 @@ async def test_double_booking_the_same_slot_is_refused(db, clinic_data, settings
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["nguyen"].id,
                 slot_id=slot.id,
+                is_new_patient=False,
             )
         )
 
@@ -132,6 +137,7 @@ async def test_idempotency_key_replays_instead_of_duplicating(db, clinic_data, s
         clinic_id=clinic_data.clinic.id,
         patient_id=clinic_data.patients["hughes"].id,
         slot_id=slot.id,
+        is_new_patient=False,
         idempotency_key="retry-key-0001",
     )
 
@@ -156,6 +162,7 @@ async def test_booking_inside_the_lead_time_is_rejected(db, clinic_data, setting
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["hughes"].id,
                 slot_id=slot.id,
+                is_new_patient=False,
             )
         )
     assert await db.scalar(select(func.count()).select_from(Appointment)) == 0
@@ -183,6 +190,7 @@ async def test_unknown_slot_is_rejected(db, clinic_data, settings) -> None:
                 clinic_id=clinic_data.clinic.id,
                 patient_id=clinic_data.patients["hughes"].id,
                 slot_id=uuid.uuid4(),
+                is_new_patient=False,
             )
         )
 
@@ -196,6 +204,7 @@ async def test_cancellation_frees_a_future_slot(db, clinic_data, settings) -> No
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
 
@@ -218,6 +227,7 @@ async def test_a_freed_slot_can_be_rebooked(db, clinic_data, settings) -> None:
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
     await service.cancel(first.appointment.id, owner=StaffAuthorised(mechanism="test"))
@@ -227,6 +237,7 @@ async def test_a_freed_slot_can_be_rebooked(db, clinic_data, settings) -> None:
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["nguyen"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
     assert second.appointment.id != first.appointment.id
@@ -241,6 +252,7 @@ async def test_cancelling_twice_is_refused(db, clinic_data, settings) -> None:
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
     await service.cancel(booked.appointment.id, owner=StaffAuthorised(mechanism="test"))
@@ -257,6 +269,7 @@ async def test_cannot_cancel_another_patients_appointment(db, clinic_data, setti
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
         )
     )
 
@@ -286,6 +299,7 @@ async def test_reschedule_moves_the_appointment_atomically(db, clinic_data, sett
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=original_slot.id,
+            is_new_patient=False,
         )
     )
     moved = await service.reschedule(
@@ -325,6 +339,7 @@ async def test_reschedule_onto_a_taken_slot_leaves_the_original_intact(
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=original_slot.id,
+            is_new_patient=False,
         )
     )
     await service.book(
@@ -332,6 +347,7 @@ async def test_reschedule_onto_a_taken_slot_leaves_the_original_intact(
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["nguyen"].id,
             slot_id=contested.id,
+            is_new_patient=False,
         )
     )
     appointment_id = booked.appointment.id
@@ -372,6 +388,7 @@ async def test_reschedule_within_the_same_day_is_allowed(db, clinic_data, settin
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slots[0].id,
+            is_new_patient=False,
         )
     )
     moved = await service.reschedule(
@@ -388,6 +405,7 @@ async def test_upcoming_excludes_cancelled_appointments(db, clinic_data, setting
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
             source=BookingSource.RECEPTION,
         )
     )
@@ -557,6 +575,7 @@ async def test_a_failed_booking_leaves_no_half_written_appointment(
                 clinic_id=clinic_data.clinic.id,
                 patient_id=patient.id,
                 slot_id=slot.id,
+                is_new_patient=False,
                 source=BookingSource.AI_CALLBOT,
             )
         )

@@ -24,6 +24,7 @@ async def _existing_booking(db, clinic_data, settings, patient_key: str = "hughe
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients[patient_key].id,
             slot_id=slots[0].id,
+            is_new_patient=False,
         )
     )
     return result.appointment

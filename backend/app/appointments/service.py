@@ -98,10 +98,25 @@ class BookingRequest:
     clinic_id: uuid.UUID
     patient_id: uuid.UUID
     slot_id: uuid.UUID
+    #: Required, with no default, for the same reason ``owner`` is: it gates a
+    #: policy check and ``False`` is the permissive branch.
+    #: ``_enforce_booking_rules`` reads ``if is_new_patient and not
+    #: appointment_type.new_patient_allowed``, so a caller who omitted it had
+    #: the appointment type approved whether or not the clinic allows new
+    #: patients on it. Every caller already knows the answer; the default only
+    #: let a future one forget to say.
+    is_new_patient: bool
     source: BookingSource = BookingSource.AI_CALLBOT
     reason_summary: str | None = None
+    #: Deliberately optional. Omitting it loses idempotent *replay* — a retry
+    #: raises rather than returning the original booking — but no invariant
+    #: becomes reachable: the partial unique indexes on the slot and on
+    #: (patient, start_time) still refuse the second appointment. The database
+    #: prevents the harm; this only makes the retry graceful.
     idempotency_key: str | None = None
-    is_new_patient: bool = False
+    #: Deliberately optional, and the weakest of the four. Omitting it writes an
+    #: audit row with no attribution rather than no audit row, so the trail
+    #: still cannot claim something happened that did not.
     actor_ref: str | None = None
 
 

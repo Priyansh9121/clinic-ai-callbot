@@ -389,9 +389,11 @@ rather than generalisation:
 1. ~~`expected_patient_id` defaulting to unchecked.~~ **Fixed** — `owner` is now
    required and typed `UUID | StaffAuthorised`, so omitting it fails to run and
    passing `None` fails to type-check. See below for what the fix uncovered.
-2. `_apply_entities`' string-literal `changed` set, where adding a field
+2. ~~`BookingRequest.is_new_patient` defaulting to the permissive branch.~~
+   **Fixed** — required, no default.
+3. `_apply_entities`' string-literal `changed` set, where adding a field
    silently stops corrections working with no failing test.
-3. The `public_message` strings in `appointments/service.py` that reach the
+4. The `public_message` strings in `appointments/service.py` that reach the
    caller from outside the response catalogue.
 
 ### What the authorisation fix uncovered
@@ -404,14 +406,43 @@ entirely**. Both handlers do gate identity earlier, so it was probably
 unreachable; it was unreachable *by convention across a function boundary*, not
 by type. Both now refuse explicitly rather than relying on that.
 
-A second permissive default remains, and is a policy gate rather than an
-authorisation one: `BookingRequest.is_new_patient` defaults to `False`, and
+The audit found a second parameter of the same shape, since fixed:
+`BookingRequest.is_new_patient` defaulted to `False`, and
 `_enforce_booking_rules` reads `if is_new_patient and not
-appointment_type.new_patient_allowed` — so the default takes the *permissive*
-branch. Both production callers pass it today. Making it required costs ~31 test
-call sites and is worth doing, but it is a smaller consequence than the
-authorisation one: a new patient booking a type not meant for them, rather than
-a caller reaching someone else's record.
+appointment_type.new_patient_allowed` — so the default took the *permissive*
+branch. It is now required with no default (29 test call sites updated).
+
+Its consequence was smaller than the authorisation one — a new patient booking
+a type not meant for them, rather than a caller reaching someone else's record —
+and that is precisely why it was worth fixing rather than noting. **Leaving one
+permissive default while fixing another teaches the codebase that permissive
+defaults are sometimes acceptable, which is the habit that produced the first
+one.** The severity argument decides priority, not whether to fix.
+
+### The two that stay optional, and why
+
+The test is: *which invariant becomes reachable when this is omitted?* Applied
+to the remaining two, the answer is none — stated here rather than left implicit.
+
+**`idempotency_key`** — omitting it loses idempotent *replay*: a retry raises
+instead of returning the original booking. It does **not** permit a double
+booking. The partial unique indexes on the slot and on `(patient, start_time)`
+still refuse the second appointment, so the database prevents the harm and this
+only makes the retry graceful. Correctly optional.
+
+**`actor_ref`** — the weakest of the four, and the closest call. Omitting it
+writes an audit row **with no attribution** rather than no audit row, so the
+property the audit trail exists for — that it can never claim something
+happened that did not — still holds. It is a degraded trail, not a bypassed
+one, which is why it stays optional. But it is the same shape one level down,
+and if a third defect of this kind appears, this is where to look first: every
+production caller already passes it, so making it required would cost only
+mechanical churn and would remove the last parameter whose omission silently
+loses something.
+
+Both are now asserted as *deliberately* defaulted in
+`test_no_parameter_that_gates_a_check_has_a_permissive_default`, so changing
+either is a visible decision rather than a drift.
 
 ### The two things to test against a real second domain
 

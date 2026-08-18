@@ -151,6 +151,40 @@ def test_a_mutating_call_without_an_owner_check_does_not_run() -> None:
         StaffAuthorised()  # type: ignore[call-arg]
 
 
+def test_no_parameter_that_gates_a_check_has_a_permissive_default() -> None:
+    """The pattern, not the two fixes.
+
+    Both defects found so far were the same shape: a parameter whose omission
+    silently took the permissive branch. `expected_patient_id=None` meant
+    "authorised", and `is_new_patient=False` meant "existing patient, skip the
+    new-patient rule". Neither failed a test, because every existing caller
+    passed them.
+
+    This pins the gating parameters as required so the next one has to be a
+    deliberate decision rather than a default nobody looked at. The two that
+    remain optional are asserted optional on purpose — see the field comments
+    in service.py for why neither makes an invariant reachable.
+    """
+    import dataclasses
+
+    from app.appointments.service import BookingRequest
+
+    fields = {f.name: f for f in dataclasses.fields(BookingRequest)}
+
+    for name in ("clinic_id", "patient_id", "slot_id", "is_new_patient"):
+        f = fields[name]
+        assert f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING, (
+            f"BookingRequest.{name} gained a default. It gates a check, so a "
+            "caller that omits it must fail to construct rather than take the "
+            "permissive branch."
+        )
+
+    # Deliberately defaulted: neither makes an invariant reachable when omitted.
+    # Recorded as an assertion so flipping one is a visible decision.
+    assert fields["idempotency_key"].default is None
+    assert fields["actor_ref"].default is None
+
+
 async def test_a_caller_cannot_cancel_someone_elses_appointment(db, clinic_data, settings) -> None:
     """The property the check exists for, at the service boundary."""
     from app.appointments.errors import AppointmentNotFoundError
@@ -168,6 +202,7 @@ async def test_a_caller_cannot_cancel_someone_elses_appointment(db, clinic_data,
             clinic_id=clinic_data.clinic.id,
             patient_id=clinic_data.patients["hughes"].id,
             slot_id=slot.id,
+            is_new_patient=False,
             source=BookingSource.AI_CALLBOT,
         )
     )
