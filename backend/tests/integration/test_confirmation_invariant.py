@@ -21,7 +21,8 @@ from sqlalchemy import func, select
 
 from app.conversation.states import ConversationState
 from app.database.models.appointment import Appointment
-from app.database.models.enums import AppointmentStatus
+from app.database.models.availability import AvailabilitySlot
+from app.database.models.enums import AppointmentStatus, SlotStatus
 
 pytestmark = pytest.mark.integration
 
@@ -108,3 +109,69 @@ async def test_a_cancellation_needs_an_explicit_yes(caller, db, clinic_data) -> 
     await caller.say("no, leave it")
     await db.refresh(booked)
     assert booked.status is AppointmentStatus.CONFIRMED, "a decline cancelled the appointment"
+
+
+# --- The owner check cannot be omitted --------------------------------------
+def test_a_mutating_call_without_an_owner_check_does_not_run() -> None:
+    """The defect this replaced: omitting the check looked like allowing it.
+
+    `expected_patient_id` used to default to None, meaning unchecked, so the
+    cross-patient authorisation on cancel and reschedule was held up by two
+    call sites remembering an argument. A third mutating flow that omitted it
+    would have type-checked, passed every test in which a caller cancels their
+    own booking, and accepted any appointment id the session happened to hold.
+
+    This asserts the failure mode directly rather than re-testing the happy
+    path: the call does not run at all. mypy enforces the same thing earlier —
+    `owner` is typed `UUID | StaffAuthorised`, so passing None is rejected too.
+    """
+    import inspect
+    import uuid as uuid_mod
+
+    from app.appointments.service import AppointmentService, StaffAuthorised
+
+    for method in (AppointmentService.cancel, AppointmentService.reschedule):
+        owner = inspect.signature(method).parameters["owner"]
+        assert owner.default is inspect.Parameter.empty, (
+            f"{method.__name__} gained a default for `owner`; omitting the "
+            "authorisation check must stay impossible"
+        )
+        assert owner.kind is inspect.Parameter.KEYWORD_ONLY
+
+    # And it genuinely raises rather than silently allowing.
+    service = AppointmentService.__new__(AppointmentService)
+    with pytest.raises(TypeError, match="owner"):
+        service.cancel(uuid_mod.uuid4())  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="owner"):
+        service.reschedule(uuid_mod.uuid4(), uuid_mod.uuid4())  # type: ignore[call-arg]
+
+    # The staff opt-out has to name its mechanism, so it is greppable in review.
+    assert StaffAuthorised(mechanism="staff_api").mechanism == "staff_api"
+    with pytest.raises(TypeError):
+        StaffAuthorised()  # type: ignore[call-arg]
+
+
+async def test_a_caller_cannot_cancel_someone_elses_appointment(db, clinic_data, settings) -> None:
+    """The property the check exists for, at the service boundary."""
+    from app.appointments.errors import AppointmentNotFoundError
+    from app.appointments.service import AppointmentService, BookingRequest
+    from app.database.models.enums import BookingSource
+
+    service = AppointmentService(db, settings)
+    slot = (
+        await db.execute(
+            select(AvailabilitySlot).where(AvailabilitySlot.status == SlotStatus.AVAILABLE).limit(1)
+        )
+    ).scalar_one()
+    booked = await service.book(
+        BookingRequest(
+            clinic_id=clinic_data.clinic.id,
+            patient_id=clinic_data.patients["hughes"].id,
+            slot_id=slot.id,
+            source=BookingSource.AI_CALLBOT,
+        )
+    )
+
+    # Nguyen names Hughes' appointment id. Indistinguishable from not found.
+    with pytest.raises(AppointmentNotFoundError):
+        await service.cancel(booked.appointment.id, owner=clinic_data.patients["nguyen"].id)

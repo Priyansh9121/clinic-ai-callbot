@@ -331,29 +331,87 @@ than a failure of design.
 
 ## What this analysis suggests
 
-**Spend nothing on generalisation until the second domain exists.**
+**Spend nothing on generalisation until the second domain exists** — but not
+because it is cheaper. It is not.
 
-Five `runtime_checkable` Protocol seams already exist — `MessageAnalyser`,
-`SessionStore`, `ClinicKnowledgeProvider`, `LLMProvider`, `SafetyClassifier` —
-and `FlowContext` already hands flows services rather than a session. A thin
-second vertical can be built behind them by writing new implementations plus new
-handlers, **touching zero existing abstraction code**: roughly 4–6 weeks, after
-which the diff between two working domains says what to abstract.
+### Correction: the second-domain estimate
 
-Costed against the alternative: an abstraction-first project covering the
-declarative state machine, N-factor identity, the resolver registry, the
-declarative field model and a re-derived confidence ladder, plus test
-re-authoring, is **4–6 months** — with the abstraction shaped by one domain and
-a guess.
+An earlier draft of this document said a second vertical was 4–6 weeks "behind
+existing Protocol seams, touching zero abstraction code". The second clause is
+true and the number is wrong, in a specific way worth naming.
+
+**The five Protocol seams are not where the clinic lives.** `MessageAnalyser`,
+`SessionStore`, `ClinicKnowledgeProvider`, `LLMProvider` and `SafetyClassifier`
+are real seams, and writing implementations behind them genuinely is a few
+weeks. But the clinic lives in the handlers, the resolvers, `dates.py`, the
+identity flow and `appointments/service.py` — **none of which sit behind a
+Protocol.** The 4–6 weeks priced the seams and omitted a second implementation
+of the parts that took longest the first time.
+
+Costed properly:
+
+| | |
+|---|---|
+| Domain flows (3–4 handlers at 1–2 weeks each) | 4–8 weeks |
+| Domain transaction service (the `appointments/service.py` equivalent) | 2–3 weeks |
+| Identity flow — N factors across 5 files | 2–3 weeks |
+| Resolvers, including a resolver *kind* that does not exist yet for checksummed identifiers | 1.5–2 weeks |
+| `dates.py` temporal direction | 1 week |
+| Safety rule set — 1 week engineering, plus weeks of domain and compliance sign-off | 1 week + external |
+| Knowledge set and a ~140-case labelled NLU corpus | 1–2 weeks, mostly domain-expert time |
+| Test re-authoring (~170 conversation/integration tests) | 3–4 weeks |
+| **Total** | **≈ 4–6 months** |
+
+Which is the same order as the abstraction-first estimate, and that comparison
+was the point the old number was making. **It does not survive.** A second
+vertical is 4–6 months whichever way it is built, because most of that work is
+the domain itself rather than the plumbing.
+
+### So the real question is different
+
+Not "second domain or abstraction" — you are paying for the domain either way.
+The question is whether to **abstract while building it or after**, and the
+argument for after is no longer cost. It is that an abstraction derived from one
+example is a guess, and the specific guesses this document makes
+([§4](#4-what-cannot-be-declarative)) are the expensive kind to get wrong: they
+are about where the model can re-enter the causal path.
+
+Two things follow. Building the second domain concretely and extracting the
+abstraction from the diff costs roughly one extra month over abstracting as you
+go — a month spent buying evidence instead of assumptions. And the sequencing is
+load-bearing: the ~140-case labelled corpus and the domain's safety rule set are
+on the critical path for *any* claim that the architecture works in that domain,
+they are mostly not engineering time, and they can start immediately.
 
 Three things are worth doing regardless, because they are bugs or latent risks
 rather than generalisation:
 
-1. `expected_patient_id` defaulting to unchecked.
+1. ~~`expected_patient_id` defaulting to unchecked.~~ **Fixed** — `owner` is now
+   required and typed `UUID | StaffAuthorised`, so omitting it fails to run and
+   passing `None` fails to type-check. See below for what the fix uncovered.
 2. `_apply_entities`' string-literal `changed` set, where adding a field
    silently stops corrections working with no failing test.
 3. The `public_message` strings in `appointments/service.py` that reach the
    caller from outside the response catalogue.
+
+### What the authorisation fix uncovered
+
+Making the parameter required surfaced a second defect the permissive default
+had been hiding. `session.patient_id` is `UUID | None`, and the old signature
+accepted `UUID | None` — so a session that reached cancel or reschedule without
+an identified patient would have passed `None` and **skipped the check
+entirely**. Both handlers do gate identity earlier, so it was probably
+unreachable; it was unreachable *by convention across a function boundary*, not
+by type. Both now refuse explicitly rather than relying on that.
+
+A second permissive default remains, and is a policy gate rather than an
+authorisation one: `BookingRequest.is_new_patient` defaults to `False`, and
+`_enforce_booking_rules` reads `if is_new_patient and not
+appointment_type.new_patient_allowed` — so the default takes the *permissive*
+branch. Both production callers pass it today. Making it required costs ~31 test
+call sites and is worth doing, but it is a smaller consequence than the
+authorisation one: a new patient booking a type not meant for them, rather than
+a caller reaching someone else's record.
 
 ### The two things to test against a real second domain
 

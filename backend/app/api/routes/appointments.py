@@ -14,7 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from app.api.deps import AppointmentSvc, ClinicSvc
-from app.appointments.service import BookingRequest
+from app.appointments.service import BookingRequest, StaffAuthorised
 from app.schemas.appointment import (
     AppointmentCancel,
     AppointmentCreate,
@@ -67,7 +67,11 @@ async def cancel_appointment(
     principal: StaffPrincipal,
 ) -> AppointmentRead:
     appointment = await service.cancel(
-        appointment_id, reason=payload.reason, actor_ref=principal.identifier
+        appointment_id,
+        # Authorised by the staff role on this route, not by owning the record.
+        owner=StaffAuthorised(mechanism="staff_api"),
+        reason=payload.reason,
+        actor_ref=principal.identifier,
     )
     return AppointmentRead.model_validate(appointment)
 
@@ -82,6 +86,7 @@ async def reschedule_appointment(
     appointment = await service.reschedule(
         appointment_id,
         payload.new_slot_id,
+        owner=StaffAuthorised(mechanism="staff_api"),
         actor_ref=principal.identifier,
         idempotency_key=payload.idempotency_key,
     )

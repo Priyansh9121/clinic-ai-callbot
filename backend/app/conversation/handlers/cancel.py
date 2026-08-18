@@ -101,13 +101,19 @@ async def _handle_confirmation(ctx: FlowContext) -> Reply | None:
         return None
     if session.target_appointment_id is None:
         return None
+    if session.patient_id is None:
+        # Identity is established before this state is reachable, but that is a
+        # property of the flow rather than of the type. If it ever stops being
+        # true, refusing is the only safe answer: the alternative is a mutation
+        # with no owner, which is exactly what `owner` exists to prevent.
+        return ctx.transfer(TransferReason.VERIFICATION_FAILED)
 
     try:
         await ctx.appointment_service.cancel(
             session.target_appointment_id,
             reason="caller request via AI callbot",
             actor_ref=session.session_id,
-            expected_patient_id=session.patient_id,
+            owner=session.patient_id,
         )
     except AppointmentStateError as exc:
         ctx.goto(ConversationState.BOOKING_COMPLETE)

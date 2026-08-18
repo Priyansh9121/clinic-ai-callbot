@@ -249,6 +249,13 @@ async def _handle_confirmation(ctx: FlowContext) -> Reply | None:
     if slot_id is None or session.target_appointment_id is None:
         return None
 
+    if session.patient_id is None:
+        # Identity is established before this state is reachable, but that is a
+        # property of the flow rather than of the type. If it ever stops being
+        # true, refusing is the only safe answer: the alternative is a mutation
+        # with no owner, which is exactly what `owner` exists to prevent.
+        return ctx.transfer(TransferReason.VERIFICATION_FAILED)
+
     if session.booking_idempotency_key is None:
         session.booking_idempotency_key = f"{session.session_id}:resched:{slot_id}"
 
@@ -257,7 +264,7 @@ async def _handle_confirmation(ctx: FlowContext) -> Reply | None:
             session.target_appointment_id,
             slot_id,
             actor_ref=session.session_id,
-            expected_patient_id=session.patient_id,
+            owner=session.patient_id,
             idempotency_key=session.booking_idempotency_key,
         )
     except SlotUnavailableError:

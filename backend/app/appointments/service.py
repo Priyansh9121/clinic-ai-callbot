@@ -62,6 +62,31 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
+class StaffAuthorised:
+    """The caller is authorised by something other than owning the record.
+
+    Cancel and reschedule take an owner check that cannot be defaulted away.
+    The two legitimate authorisations look different at the call site on
+    purpose: the conversation engine passes the patient id it verified, and the
+    staff API passes this, naming the mechanism that authorised it instead.
+
+    Before this existed the parameter defaulted to None, so "staff are
+    authorised by their API key" and "somebody forgot the owner check" were the
+    same call. A third mutating flow that omitted it would have type-checked,
+    passed every test in which a caller cancels their own booking, and accepted
+    any appointment id the session happened to hold.
+    """
+
+    #: Which mechanism. Recorded so the audit row says why this was allowed.
+    mechanism: str
+
+
+#: Either the patient who must own the record, or an explicit statement that
+#: ownership is not the authorisation. There is no third option and no default.
+OwnerCheck = uuid.UUID | StaffAuthorised
+
+
+@dataclass(frozen=True, slots=True)
 class BookingRequest:
     """A fully-resolved booking instruction.
 
@@ -226,20 +251,22 @@ class AppointmentService:
         self,
         appointment_id: uuid.UUID,
         *,
+        owner: OwnerCheck,
         reason: str | None = None,
         source: BookingSource = BookingSource.AI_CALLBOT,
         actor_ref: str | None = None,
-        expected_patient_id: uuid.UUID | None = None,
     ) -> Appointment:
         """Cancel and release the slot back to AVAILABLE.
 
-        ``expected_patient_id`` is an authorisation check, not a filter: the
-        conversation engine passes the verified patient so a caller can never
-        cancel someone else's appointment by guessing an id.
+        ``owner`` is an authorisation check, not a filter: the conversation
+        engine passes the verified patient so a caller can never cancel someone
+        else's appointment by guessing an id. It has no default — a caller that
+        is authorised some other way must say so with ``StaffAuthorised``
+        rather than by omitting the argument.
         """
         async with self._atomic():
             appointment = await self._lock_appointment(appointment_id)
-            if expected_patient_id and appointment.patient_id != expected_patient_id:
+            if isinstance(owner, uuid.UUID) and appointment.patient_id != owner:
                 # Same error as "not found" — no information disclosure.
                 raise AppointmentNotFoundError()
             if appointment.status != AppointmentStatus.CONFIRMED:
@@ -280,9 +307,9 @@ class AppointmentService:
         appointment_id: uuid.UUID,
         new_slot_id: uuid.UUID,
         *,
+        owner: OwnerCheck,
         source: BookingSource = BookingSource.AI_CALLBOT,
         actor_ref: str | None = None,
-        expected_patient_id: uuid.UUID | None = None,
         idempotency_key: str | None = None,
     ) -> Appointment:
         """Move an appointment to a new slot, atomically.
@@ -298,7 +325,7 @@ class AppointmentService:
         async with self._atomic():
             # Lock order: appointment, then slot — matches book()/cancel().
             original = await self._lock_appointment(appointment_id)
-            if expected_patient_id and original.patient_id != expected_patient_id:
+            if isinstance(owner, uuid.UUID) and original.patient_id != owner:
                 raise AppointmentNotFoundError()
             if original.status != AppointmentStatus.CONFIRMED:
                 raise AppointmentStateError(

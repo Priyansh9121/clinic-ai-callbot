@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from app.appointments.availability import AvailabilityQuery, AvailabilityService
 from app.appointments.errors import AppointmentNotFoundError, SlotNotFoundError
-from app.appointments.service import AppointmentService, BookingRequest
+from app.appointments.service import AppointmentService, BookingRequest, StaffAuthorised
 from app.core.errors import AppointmentStateError, BookingRuleError, SlotUnavailableError
 from app.core.timeutils import DayPeriod, utc_now
 from app.database.models.appointment import Appointment
@@ -199,7 +199,9 @@ async def test_cancellation_frees_a_future_slot(db, clinic_data, settings) -> No
         )
     )
 
-    cancelled = await service.cancel(booked.appointment.id, reason="caller request")
+    cancelled = await service.cancel(
+        booked.appointment.id, owner=StaffAuthorised(mechanism="test"), reason="caller request"
+    )
     assert cancelled.status is AppointmentStatus.CANCELLED
     assert cancelled.cancelled_at is not None
 
@@ -218,7 +220,7 @@ async def test_a_freed_slot_can_be_rebooked(db, clinic_data, settings) -> None:
             slot_id=slot.id,
         )
     )
-    await service.cancel(first.appointment.id)
+    await service.cancel(first.appointment.id, owner=StaffAuthorised(mechanism="test"))
 
     second = await service.book(
         BookingRequest(
@@ -241,9 +243,9 @@ async def test_cancelling_twice_is_refused(db, clinic_data, settings) -> None:
             slot_id=slot.id,
         )
     )
-    await service.cancel(booked.appointment.id)
+    await service.cancel(booked.appointment.id, owner=StaffAuthorised(mechanism="test"))
     with pytest.raises(AppointmentStateError):
-        await service.cancel(booked.appointment.id)
+        await service.cancel(booked.appointment.id, owner=StaffAuthorised(mechanism="test"))
 
 
 async def test_cannot_cancel_another_patients_appointment(db, clinic_data, settings) -> None:
@@ -263,7 +265,7 @@ async def test_cannot_cancel_another_patients_appointment(db, clinic_data, setti
     appointment_id = booked.appointment.id
 
     with pytest.raises(AppointmentNotFoundError):
-        await service.cancel(appointment_id, expected_patient_id=clinic_data.patients["nguyen"].id)
+        await service.cancel(appointment_id, owner=clinic_data.patients["nguyen"].id)
 
     still_confirmed = await db.get(Appointment, appointment_id)
     await db.refresh(still_confirmed)
@@ -286,7 +288,9 @@ async def test_reschedule_moves_the_appointment_atomically(db, clinic_data, sett
             slot_id=original_slot.id,
         )
     )
-    moved = await service.reschedule(booked.appointment.id, new_slot.id)
+    moved = await service.reschedule(
+        booked.appointment.id, new_slot.id, owner=StaffAuthorised(mechanism="test")
+    )
 
     assert moved.id != booked.appointment.id
     assert moved.start_time == new_slot.start_time
@@ -334,7 +338,9 @@ async def test_reschedule_onto_a_taken_slot_leaves_the_original_intact(
     original_slot_id = original_slot.id
 
     with pytest.raises(SlotUnavailableError):
-        await service.reschedule(appointment_id, contested.id)
+        await service.reschedule(
+            appointment_id, contested.id, owner=StaffAuthorised(mechanism="test")
+        )
 
     unchanged = await db.get(Appointment, appointment_id)
     await db.refresh(unchanged)
@@ -368,7 +374,9 @@ async def test_reschedule_within_the_same_day_is_allowed(db, clinic_data, settin
             slot_id=slots[0].id,
         )
     )
-    moved = await service.reschedule(booked.appointment.id, slots[1].id)
+    moved = await service.reschedule(
+        booked.appointment.id, slots[1].id, owner=StaffAuthorised(mechanism="test")
+    )
     assert moved.status is AppointmentStatus.CONFIRMED
 
 
@@ -385,7 +393,7 @@ async def test_upcoming_excludes_cancelled_appointments(db, clinic_data, setting
     )
     assert len(await service.upcoming_for_patient(clinic_data.patients["hughes"].id)) == 1
 
-    await service.cancel(booked.appointment.id)
+    await service.cancel(booked.appointment.id, owner=StaffAuthorised(mechanism="test"))
     assert await service.upcoming_for_patient(clinic_data.patients["hughes"].id) == []
 
 
@@ -504,7 +512,7 @@ async def test_a_failed_cancellation_does_not_delete_the_caller(db, clinic_data,
     service = AppointmentService(db, settings)
 
     with pytest.raises(AppointmentNotFoundError):
-        await service.cancel(uuid.uuid4())
+        await service.cancel(uuid.uuid4(), owner=StaffAuthorised(mechanism="test"))
 
     assert await PatientService(db).get(patient_id) is not None
 
@@ -517,7 +525,9 @@ async def test_a_failed_reschedule_does_not_delete_the_caller(db, clinic_data, s
     service = AppointmentService(db, settings)
 
     with pytest.raises(AppointmentNotFoundError):
-        await service.reschedule(uuid.uuid4(), uuid.uuid4())
+        await service.reschedule(
+            uuid.uuid4(), uuid.uuid4(), owner=StaffAuthorised(mechanism="test")
+        )
 
     assert await PatientService(db).get(patient_id) is not None
 
