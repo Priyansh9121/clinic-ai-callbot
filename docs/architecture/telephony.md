@@ -287,7 +287,9 @@ Measured for the media transport in isolation, on loopback:
 | Resampler filter delay (`HQ`, 8↔16 kHz) | ~66 ms each way; `QQ` is ~0.25 ms |
 
 **End-to-end call latency has now been measured** — 1128 ms median from speech
-end to first byte on the wire, over six turns on real calls. See
+end to first byte on the wire, over six turns on real calls. That was at the
+500 ms endpointing setting; it is ~1330 ms now that endpointing is a 700 ms
+stopgap. See
 docs/architecture/latency.md. The transport contributes 1.5 ms of that, so the
 phone did not meaningfully exceed the local floor.
 

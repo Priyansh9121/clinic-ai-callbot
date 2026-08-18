@@ -352,7 +352,9 @@ Confirmed on real calls to `700`, Asterisk 20.6.0:
 - Media format negotiated correctly in both directions on every call:
   `read_format=slin`, `write_format=slin`, `simple_bridge`, inbound cadence
   20.0 ms.
-- Measured speech end → first byte on the wire: **1128 ms median**. Breakdown
+- Measured speech end → first byte on the wire: **1128 ms median** at the time.
+  Endpointing has since been raised from 500 to 700 ms to stop callers being
+  interrupted mid-identity, so the current figure is ~1330 ms. Breakdown
   in docs/architecture/latency.md.
 
 Still unperformed: §4–§6 and §8–§16 — booking end to end over the phone,
