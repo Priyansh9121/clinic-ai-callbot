@@ -607,3 +607,52 @@ in exactly that population. Whisper large-v3-turbo is the only measured
 candidate that is both multilingual and materially better on those names — and
 it is 13x too slow on this hardware. That combination is the real constraint on
 this milestone, and it is a hardware problem before it is a model problem.
+
+
+## Step 3 (TTS): Kokoro-82M measured, rejected on latency
+
+Apache-2.0 throughout — `hexgrad/Kokoro-82M` and the
+`onnx-community/Kokoro-82M-v1.0-ONNX` export both — with 55 voices including
+eight British ones, so the licence and the voice range are not the problem.
+
+It takes phoneme IDs rather than text, so it needs a G2P step: two new
+dependencies (`espeakng-loader`, `phonemizer-fork`) and no torch. Not a new
+class of dependency, since `piper-tts` already bundles espeak.
+
+**It is too slow.** Per-sentence synthesis, which is how it would have to be
+driven to keep playback chunked and cancellable:
+
+| | median | p95 | RTF | RSS |
+|---|---|---|---|---|
+| Piper `en_GB-alan-medium` | **176 ms** | 278 ms | ~0.03 | small |
+| Kokoro int8 (`model_quantized`) | 1770 ms | 3701 ms | 0.543 | 226 MB |
+| Kokoro fp16 (`model_fp16`) | **747 ms** | 1584 ms | 0.224 | 528 MB |
+
+The int8 result is worth recording separately: it is **2.4x slower than fp16**
+on this hardware. Quantised graphs are not reliably faster on ARM, and reading
+the int8 number alone would have made the model look four times worse than it
+is.
+
+Even at its best, fp16 is 4.2x Piper's time-to-first-audio, 2.5x over the
+300 ms target, and costs 528 MB. Piper synthesises at roughly 30x real time;
+Kokoro manages 4.5x. On a turn budget already 1330 ms over target, adding
+571 ms to first audio is the wrong direction.
+
+Naturalness was not measured. That is deliberate: a voice that cannot start
+inside 300 ms is not a candidate, and running the speak-then-transcribe
+comparison would have produced a number with nothing to decide.
+
+### The complaint is probably fixable for free
+
+"Slow and flat" is two separate things, and both have zero-cost levers already
+in the configuration:
+
+* **Slow** — `TTS_LENGTH_SCALE` is commented out, so the voice runs at its
+  default pace. It is a single float and costs nothing to change. The existing
+  comment warns that speeding a receptionist up sounds brusque, which is a
+  judgement worth re-testing by ear rather than assuming.
+* **Flat** — `en_GB-alan-medium` is one of four voices already on disk
+  (`en_GB-alba`, `en_GB-jenny_dioco`, `en_US-lessac`). Swapping is one
+  environment variable and no new model.
+
+Worth trying both before spending 528 MB and 571 ms on a different engine.
