@@ -17,8 +17,10 @@ transactional.
 > extension 700 against Asterisk 20.6.0: six completed turns, the caller heard
 > and answered, with `read_format=slin` / `write_format=slin` at both media-up
 > and bridged on every call. Measured speech-end to first byte on the wire:
-> **1128 ms median**. See [Measured telephone latency](#measured-telephone-latency)
-> and [`docs/development/local-sip.md`](docs/development/local-sip.md).
+> **1128 ms median** at the time, now ~1330 ms after endpointing was
+> deliberately relaxed to stop callers being interrupted mid-identity. See
+> [Measured telephone latency](#measured-telephone-latency) and
+> [`docs/development/local-sip.md`](docs/development/local-sip.md).
 >
 > **All data in this repository is fictional.** "Riverside Medical Clinic", its
 > practitioners and its patients are synthetic development fixtures. This
@@ -452,7 +454,8 @@ carries the whole breakdown on one line.
 | Engine — with the LLM | 2145–3826 ms | hidden behind the acknowledgement |
 | TTS to first audio (Piper) | 176 ms | |
 | Transport to the wire | **1.5 ms** | resampler + queue + pacer |
-| **Speech end → first byte on the wire** | **1128 ms** (1065–1155) | against a 700 ms target |
+| **Speech end → first byte on the wire** | **1128 ms** (1065–1155) | measured at 500 ms endpointing |
+| — with the 700 ms endpointing stopgap | **~1330 ms** | against a 700 ms target |
 
 **The phone adds nothing measurable.** The 1135 ms measured locally over a
 microphone was a floor, and the SIP leg did not meaningfully exceed it. The
@@ -622,11 +625,21 @@ change is an explicit operational step, not a side effect of a restart.
   Measured: **barge-in fired ~25 times in 28 seconds and no turn ever
   completed.** Use headphones, or a handset. Acoustic echo cancellation is not
   implemented; on a phone line the far-end echo profile is different again.
-- **The telephone latency target is missed by the same margin as the
-  microphone.** Measured 1128 ms median from speech end to first byte on the
-  wire against a 700 ms target. The phone adds nothing measurable: the
-  transport itself costs ~1.5 ms, and the SIP leg did not move the number. The
-  gap is endpointing plus transcription, exactly as it was locally.
+- **The telephone latency target is missed, and both halves of the gap have
+  been attacked without moving it.** ~1330 ms from speech end to the wire
+  against a 700 ms target (endpointing 750, STT 466, TTS 176, transport 1.5).
+  The transport is not the problem — it costs 1.5 ms, and the SIP leg added
+  nothing measurable over the microphone.
+  *Endpointing:* a semantic turn detector (Smart Turn v3) was implemented and
+  measured. The trade is monotonic — every millisecond it saves costs splits on
+  spelled surnames and dates of birth — so no threshold beats the silence rule.
+  The 750 ms in use is a deliberate stopgap that buys not-interrupting-callers
+  at the cost of latency.
+  *Transcription:* four streaming candidates were measured and all four
+  rejected — full-context encoder, 13x too slow, non-permissive licence, and
+  deaf on G.711 respectively. Closing the gap needs a streaming model trained
+  with telephony augmentation, or hardware with headroom for
+  large-v3-turbo. See docs/architecture/latency.md.
 - **Telephony barge-in is measured only to the edge of our process.** Playback
   stops in under a millisecond and pacing bounds un-recallable audio to roughly
   one 20 ms frame, but what a caller *hears* also includes Asterisk and the

@@ -145,3 +145,46 @@ streaming STT decoder. Measure before changing either.
 `to_wire_ms` is the honest end of this measurement. Asterisk's own buffering,
 the network and the handset's jitter buffer are past the socket and were not
 measured; the caller's perceived latency is this plus that.
+
+
+## Step 2 (streaming STT): closed as a negative result
+
+Four candidates measured, four distinct reasons, none adopted. **Speech-end to
+wire stays at ~1330 ms.**
+
+| candidate | licence | why not |
+|---|---|---|
+| Parakeet TDT 0.6b v3 | CC-BY-4.0 ✓ | encoder is full-context — no cache inputs, so "streaming" is a growing buffer. ~70 ms gain for 876 MB RSS |
+| Whisper large-v3-turbo | MIT ✓ | best on names by far (Nguyen, Siobhan, Ranpura all correct) but 13x slower — 13.3 s per utterance — and +999 MB |
+| NeMo FastConformer 80 ms | **NGC Terms** ✗ | cache-aware and fast, but NGC does not state a permissive licence. The sibling `_multi` declares CC-BY-4.0; this one does not, and that difference is the point |
+| Streaming Zipformer | Apache-2.0 ✓ | cache-aware, 69 MB, **21.6 ms** post-speech-end — and deaf on G.711. "can't breathe" → "THREE", two utterances → empty |
+
+Current breakdown, unchanged:
+
+| stage | median |
+|---|---|
+| Endpointing | 750 ms |
+| STT (base.en) | 466 ms |
+| TTS to first audio | 176 ms |
+| Transport to wire | 1.5 ms |
+| **Speech end → first byte on wire** | **~1330 ms** |
+
+The 750 ms endpointing figure is a **deliberate stopgap**, not a tuned value.
+It trades ~200 ms of latency for not interrupting callers mid-identity: at
+500 ms the hard-case harness split a spelled surname five times and cut a date
+of birth in half, on live calls. See the endpointing section in
+voice-pipeline.md.
+
+**What would actually close the gap**, in order of likelihood:
+
+1. **A streaming model trained with telephony augmentation.** Every rejected
+   candidate lacked exactly this property. The Zipformer proves the shape works
+   — 21.6 ms post-speech-end, 69 MB, Apache-2.0 — it simply cannot hear 8 kHz
+   G.711. A model with the same architecture and narrowband training data would
+   close most of the 1330 ms on its own.
+2. **Hardware with headroom for large-v3-turbo.** It is already the best
+   measured option for the name-recognition problem, and it is multilingual.
+   8 GB shared with Ollama, Piper and Whisper is the constraint, not the model.
+
+Both are procurement decisions rather than engineering ones, which is why this
+step closes here rather than continuing.
